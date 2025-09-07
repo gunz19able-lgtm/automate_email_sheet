@@ -555,7 +555,7 @@ async def send_batch_tennis_report_email(
 
                 <p>Hi {CLIENT_NAME},</p>
 
-                <p>Here’s your hourly automated report with the latest league statistics.</p>
+                <p>Here’s your daily automated report with the latest league statistics.</p>
 
                 <div class="summary-section">
                     <h3 style="margin-top: 0; color: #495057;">📊 Report Summary</h3>
@@ -606,7 +606,7 @@ async def send_batch_tennis_report_email(
             "",
             f"Hi {CLIENT_NAME},",
             "",
-            "Here’s your hourly automated report with the latest league statistics.",
+            "Here’s your daily automated report with the latest league statistics.",
             "",
             "Report Details:",
             f"• Generated: {datetime.now(ZoneInfo('Europe/Copenhagen')).strftime('%Y-%m-%d %H:%M:%S')}",
