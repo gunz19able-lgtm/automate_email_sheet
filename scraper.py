@@ -7,7 +7,7 @@ import pandas as pd
 import asyncio
 
 
-logger = asyncio.run(setup_logger('facebook_automation'))
+logger = asyncio.run(setup_logger('scraper'))
 
 
 async def load_league_pool_combinations_from_excel(filename: str = 'team_pool_ids.xlsx'):
@@ -42,40 +42,87 @@ async def division_name_call(league_id):
     return division_name
 
 
-async def get_players(team_id):
+async def get_ranking_position_of_players(player_id):
     headers = {
-    f'User-Agent': await random_useragent(),
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Referer': 'https://rankedin.com/en/team/homepage/1764246',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-origin',
-    'Connection': 'keep-alive',
-    'Cookie': 'ai_user=DFzEjMtcUnEUDoZhTMKlbQ^|2025-08-11T18:49:59.686Z; __stripe_mid=6d617d98-f9ca-4fb0-b4f7-dfc799d68f5a760a87; modal-ads={%22_playerId%22:null%2C%22_ads%22:[{%22_id%22:9%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:10%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:4%2C%22_lastAdDate%22:%222025-08-11%22}]}; ARRAffinity=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; ARRAffinitySameSite=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; language=en',
-}
-    url = f"https://rankedin.com/team/tlhomepage/{team_id}"
+        'User-Agent': await random_useragent(),
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://rankedin.com/',
+        'Origin': 'https://rankedin.com',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-site',
+        'Connection': 'keep-alive',
+        'Cookie': '__stripe_mid=16e922e5-5bf8-4bc4-bfdc-b3ed123707485e1815; ARRAffinity=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; ARRAffinitySameSite=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; __stripe_sid=16ce339f-872c-4086-9faa-30e6ed00222635a810',
+    }
+
+    api_url = f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={player_id}"
 
     try:
-        response = await make_requests(url, headers = headers)
+        response = await make_requests(api_url, headers = headers)
+        ranking_position = response.json()[0][-1]['Standing']
+
+    except Exception as e:
+        ranking_position = ""
+    return ranking_position
+
+
+async def get_players(season_id):
+    headers = {
+        f'User-Agent': await random_useragent(),
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://rankedin.com/en/team/homepage/1764246',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'Connection': 'keep-alive',
+        'Cookie': 'ai_user=DFzEjMtcUnEUDoZhTMKlbQ^|2025-08-11T18:49:59.686Z; __stripe_mid=6d617d98-f9ca-4fb0-b4f7-dfc799d68f5a760a87; modal-ads={%22_playerId%22:null%2C%22_ads%22:[{%22_id%22:9%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:10%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:4%2C%22_lastAdDate%22:%222025-08-11%22}]}; ARRAffinity=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; ARRAffinitySameSite=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; language=en',
+    }
+    url = f"https://rankedin.com/team/tlhomepage/{season_id}"
+
+    try:
+        response = await make_requests(url, headers=headers)
         raw_datas = response.json()
         team_club_id = raw_datas['Team']['HomeClub']['Id']
         players_lists = raw_datas['Team']['Players']
         players_listings_dicts = []
 
+        # Extract player IDs for ranking position lookup
+        player_ids = [player_data['Id'] for player_data in players_lists]
+
+        # Get ranking positions concurrently
+        ranking_map = {}
+        if player_ids:
+            logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {season_id}...")
+            ranking_tasks = [get_ranking_position_of_players(player_id) for player_id in player_ids]
+            ranking_results = await asyncio.gather(*ranking_tasks, return_exceptions=True)
+
+            # Create a mapping of player_id to ranking position
+            for i, result in enumerate(ranking_results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error getting ranking for player {player_ids[i]}: {result}")
+                    ranking_map[player_ids[i]] = ""
+                else:
+                    ranking_map[player_ids[i]] = result
+
+        # Build player data with ranking positions
         for idx in range(len(players_lists)):
             player_datas = players_lists[idx]
+            player_id = player_datas['Id']
 
             datas = {
-                'Team_ID_Players': team_id,
+                'Team_ID_Players': season_id,
                 'Pool ID': raw_datas['PoolId'],
                 'Team League ID': raw_datas['TeamLeagueId'],
                 'Team League Name': raw_datas['TeamLeagueName'],
                 'State Message': raw_datas['StateMessage'],
-                'Player ID': player_datas['Id'],
+                'Player ID': player_id,
+                'Ranking Position': ranking_map.get(player_id, ""),  # Use actual ranking position
                 'RankedInId': player_datas['RankedinId'],
                 'Name': player_datas['FirstName'],
                 'Player Order': player_datas['PlayerOrder'],
+                'Player Rating': player_datas['RatingBegin'],
                 'Team Participant Type': player_datas['TeamParticipantType'],
                 'Has License': player_datas['HasLicense'],
                 'Player URL': f"https://rankedin.com{player_datas['PlayerUrl']}",
@@ -91,7 +138,7 @@ async def get_players(team_id):
 
         return players_listings_dicts
     except Exception as e:
-        logger.error(f"Error getting players for team {team_id}: {str(e)}")
+        logger.error(f"Error getting players for team {season_id}: {str(e)}")
         return []
 
 
@@ -158,7 +205,7 @@ async def get_matches(team_home_id, team_away_id, match_id):
 
             # Base match data with properly matched team IDs and match ID
             match_data = {
-                'Match_ID': match_id,  # Ensure match_id is included and matches
+                'Round_ID': match_id,  # Ensure match_id is included and matches
                 'Team_Home_ID_Matches': team_home_id,  # Home team ID from parameters
                 'Team_Away_ID_Matches': team_away_id,  # Away team ID from parameters
                 'Date': matches['Date'],
@@ -236,7 +283,7 @@ async def get_matches(team_home_id, team_away_id, match_id):
         if matches_listings_dicts == []:
             matches_listings_dicts.append(
                 {
-                "Match_ID": match_id,
+                "Round_ID": match_id,
                 "Team_Home_ID_Matches": team_home_id,
                 "Team_Away_ID_Matches": team_away_id,
                 "Date": "",
@@ -278,7 +325,7 @@ async def get_matches(team_home_id, team_away_id, match_id):
         logger.error(f"Error getting matches for team {team_home_id} and {team_away_id}, match {match_id}: {str(e)}")
         # Return empty match data to maintain structure with proper IDs
         return [{
-            "Match_ID": match_id,
+            "Round_ID": match_id,
             "Team_Home_ID_Matches": team_home_id,
             "Team_Away_ID_Matches": team_away_id,
             "Date": "",
@@ -315,7 +362,7 @@ async def get_matches(team_home_id, team_away_id, match_id):
         }]
 
 
-async def get_organisation_id(team_id, org_id, max_admins=None, max_logos=None):
+async def get_organisation_id(season_id, org_id, max_admins=None, max_logos=None):
     headers = {
     'User-Agent': await random_useragent(),
     'Accept': 'application/json, text/plain, */*',
@@ -406,7 +453,7 @@ async def get_organisation_id(team_id, org_id, max_admins=None, max_logos=None):
 
         # Create the complete dictionary in the desired order
         orgi_data = {
-            'team_id_organisation': team_id,
+            'team_id_organisation': season_id,
             'Organisation_Id': org_id,
             'Name': contact_infos['organisationName'],
             'Phone': phone,
@@ -427,7 +474,7 @@ async def get_organisation_id(team_id, org_id, max_admins=None, max_logos=None):
         return [orgi_data]
 
     except Exception as e:
-        logger.error(f"Error getting organization for team {team_id}, org {org_id}: {str(e)}")
+        logger.error(f"Error getting organization for team {season_id}, org {org_id}: {str(e)}")
         return []
 
 
@@ -469,10 +516,10 @@ async def get_standings_rounds_data(league_id, pool_id):
         for jdx in range(len(standing_tables)):
             standing_results = standing_tables[jdx]
             standing_datas = {
-                'Team League ID': league_id,
+                'Season League ID': league_id,
                 'Pool ID': pool_id,
                 'Participant ID': standing_results['ParticipantId'],
-                'Team_ID_Standings': standing_results['ParticipantUrl'].split('/')[-1],
+                'Season_ID_Standings': standing_results['ParticipantUrl'].split('/')[-1],
                 'Standing': standing_results['Standing'],
                 'Name': standing_results['ParticipantName'],
                 'Match Points': standing_results['MatchPoints'],
@@ -505,7 +552,7 @@ async def get_standings_rounds_data(league_id, pool_id):
                 match_ids.append(matches[gdx]['MatchId'])
 
                 round_matches_datas = {
-                    'Team League ID': league_id,
+                    'Season League ID': league_id,
                     'Pool ID': pool_id,
                     'Match ID': matches[gdx]['MatchId'],
                     'Date': target_datas['RoundDate'],
@@ -529,9 +576,9 @@ async def get_standings_rounds_data(league_id, pool_id):
         return {
             'standings': standings_listing_dicts,
             'rounds': round_listing_dicts,
-            'Team_ID_Home': home_team_ids,  # Now properly separated
-            'Team_ID_Away': away_team_ids,  # Now properly separated
-            'match_ids': match_ids,
+            'Season_ID_Home': home_team_ids,  # Now properly separated
+            'Season_ID_Away': away_team_ids,  # Now properly separated
+            'round_ids': match_ids,
             'division_name': division_name
         }
 
@@ -540,27 +587,27 @@ async def get_standings_rounds_data(league_id, pool_id):
         return None
 
 
-async def collect_data_concurrently(Team_ID_Home, Team_ID_Away, match_ids):
+async def collect_data_concurrently(Season_ID_Home, Season_ID_Away, match_ids):
     """
     Collect players, matches, and organizations data concurrently
     """
     logger.info("Starting concurrent data collection...")
 
     # Combine home and away team IDs for unique team collection
-    all_team_ids = Team_ID_Home + Team_ID_Away
-    unique_team_ids = list(set(all_team_ids))
+    all_season_ids = Season_ID_Home + Season_ID_Away
+    unique_season_ids = list(set(all_season_ids))
 
     # Create team-match tuples with home/away distinction for matches
-    team_match_tuples = list(zip(Team_ID_Home, Team_ID_Away, match_ids))
+    team_match_tuples = list(zip(Season_ID_Home, Season_ID_Away, match_ids))
 
-    # Collect players data concurrently
-    logger.info(f"Collecting players data for {len(unique_team_ids)} teams concurrently...")
-    players_tasks = [get_players(str(team_id)) for team_id in unique_team_ids]
+    # Collect players data concurrently (now includes ranking positions)
+    logger.info(f"Collecting players data for {len(unique_season_ids)} teams concurrently...")
+    players_tasks = [get_players(str(season_id)) for season_id in unique_season_ids]
     players_results = await asyncio.gather(*players_tasks, return_exceptions=True)
 
     # Flatten players results and collect organization IDs
     all_players = []
-    org_team_pairs = []
+    org_season_pairs = []
 
     for i, result in enumerate(players_results):
         if isinstance(result, Exception):
@@ -570,14 +617,14 @@ async def collect_data_concurrently(Team_ID_Home, Team_ID_Away, match_ids):
         if result:
             all_players.extend(result)
             # Collect unique organization IDs from players
-            team_id = unique_team_ids[i]
+            season_id = unique_season_ids[i]
             for player in result:
                 org_id = player.get('Team Club Id')
                 if org_id:
-                    org_team_pairs.append((team_id, org_id))
+                    org_season_pairs.append((season_id, org_id))
 
     # Remove duplicate organization requests
-    unique_org_pairs = list(set(org_team_pairs))
+    unique_org_pairs = list(set(org_season_pairs))
 
     # Collect matches data concurrently with proper home/away team IDs
     logger.info(f"Collecting matches data for {len(team_match_tuples)} matches concurrently...")
@@ -598,16 +645,16 @@ async def collect_data_concurrently(Team_ID_Home, Team_ID_Away, match_ids):
     # Remove duplicate organization IDs (keep only unique org_ids)
     unique_org_ids = list(set([org_id for _, org_id in unique_org_pairs]))
 
-    # Collect organizations data concurrently (using first team_id for each unique org_id)
+    # Collect organizations data concurrently (using first season_id for each unique org_id)
     logger.info(f"Collecting organizations data for {len(unique_org_ids)} unique organizations concurrently...")
 
-    # Create mapping of org_id to team_id for API calls
-    org_to_team = {}
-    for team_id, org_id in unique_org_pairs:
-        if org_id not in org_to_team:
-            org_to_team[org_id] = team_id
+    # Create mapping of org_id to season_id for API calls
+    org_to_season = {}
+    for season_id, org_id in unique_org_pairs:
+        if org_id not in org_to_season:
+            org_to_season[org_id] = season_id
 
-    org_tasks = [get_organisation_id(str(org_to_team[org_id]), str(org_id)) for org_id in unique_org_ids]
+    org_tasks = [get_organisation_id(str(org_to_season[org_id]), str(org_id)) for org_id in unique_org_ids]
     org_results = await asyncio.gather(*org_tasks, return_exceptions=True)
 
     # Flatten organization results
@@ -641,9 +688,9 @@ async def collect_all_league_data(league_id, pool_id):
 
     # Now collect players, matches, and organizations concurrently using separate home/away team IDs
     concurrent_data = await collect_data_concurrently(
-        main_data['Team_ID_Home'],
-        main_data['Team_ID_Away'],
-        main_data['match_ids']
+        main_data['Season_ID_Home'],
+        main_data['Season_ID_Away'],
+        main_data['round_ids']
     )
 
     # Combine all data
@@ -683,51 +730,51 @@ async def collect_multiple_league_data(team_pool_combinations, delay, batches):
 
         # Create tasks for all combinations in this batch
         tasks = []
-        for team_id, pool_id in batch_combinations:
-            task = asyncio.create_task(collect_all_league_data(team_id, pool_id))
-            tasks.append((task, team_id, pool_id))
+        for season_id, pool_id in batch_combinations:
+            task = asyncio.create_task(collect_all_league_data(season_id, pool_id))
+            tasks.append((task, season_id, pool_id))
 
         # Wait for all tasks in the batch to complete
-        for task, team_id, pool_id in tasks:
+        for task, season_id, pool_id in tasks:
             try:
                 scraped_data = await task
                 if scraped_data is None:
-                    logger.error(f"Failed to collect data for League {team_id}, Pool {pool_id}")
-                    failed_combinations.append((team_id, pool_id))
+                    logger.error(f"Failed to collect data for League {season_id}, Pool {pool_id}")
+                    failed_combinations.append((season_id, pool_id))
                     continue
 
                 # Add data to combined results
                 for record in scraped_data.get('standings', []):
-                    record['team_id'] = team_id
+                    record['season_id'] = season_id
                     record['pool_id'] = pool_id
                     all_standings.append(record)
 
                 for record in scraped_data.get('rounds', []):
-                    record['team_id'] = team_id
+                    record['season_id'] = season_id
                     record['pool_id'] = pool_id
                     all_rounds.append(record)
 
                 for record in scraped_data.get('players', []):
-                    record['team_id'] = team_id
+                    # record['season_id'] = season_id
                     record['pool_id'] = pool_id
                     all_players.append(record)
 
                 for record in scraped_data.get('matches', []):
-                    record['team_id'] = team_id
+                    record['season_id'] = season_id
                     record['pool_id'] = pool_id
                     all_matches.append(record)
 
                 for record in scraped_data.get('organizations', []):
-                    record['team_id'] = team_id
+                    record['season_id'] = season_id
                     record['pool_id'] = pool_id
                     all_organizations.append(record)
 
-                successful_combinations.append((team_id, pool_id))
-                logger.info(f"Successfully processed League {team_id}, Pool {pool_id}")
+                successful_combinations.append((season_id, pool_id))
+                logger.info(f"Successfully processed League {season_id}, Pool {pool_id}")
 
             except Exception as e:
-                logger.error(f"Error processing League {team_id}, Pool {pool_id}: {str(e)}")
-                failed_combinations.append((team_id, pool_id))
+                logger.error(f"Error processing League {season_id}, Pool {pool_id}: {str(e)}")
+                failed_combinations.append((season_id, pool_id))
 
         # Random delay between batches (except for the last batch)
         if batch_idx < len(batches):
@@ -761,53 +808,53 @@ async def collect_multiple_league_data_archive(team_pool_combinations):
 
     logger.info(f"Starting batch collection for {len(team_pool_combinations)} league/pool combinations")
 
-    for team_id, pool_id in team_pool_combinations:
+    for season_id, pool_id in team_pool_combinations:
         try:
-            scraped_data = await collect_all_league_data(team_id, pool_id)
+            scraped_data = await collect_all_league_data(season_id, pool_id)
             if scraped_data is None:
-                logger.error(f"Failed to collect data for League {team_id}, Pool {pool_id}")
-                failed_combinations.append(team_id, pool_id)
+                logger.error(f"Failed to collect data for League {season_id}, Pool {pool_id}")
+                failed_combinations.append(season_id, pool_id)
                 continue
 
             # Add league_id and pool_id to each record
             # Standings
             for record in scraped_data.get('standings', []):
-                record['team_id'] = team_id
+                record['season_id'] = season_id
                 record['pool_id'] = pool_id
                 all_standings.append(record)
 
             # Rounds:
             for record in scraped_data.get('rounds', []):
-                record['team_id'] = team_id
+                record['season_id'] = season_id
                 record['pool_id'] = pool_id
                 all_rounds.append(record)
 
             # Players:
             for record in scraped_data.get('players', []):
-                record['team_id'] = team_id
+                record['season_id'] = season_id
                 record['pool_id'] = pool_id
                 all_players.append(record)
 
             # Matches:
             for record in scraped_data.get('matches', []):
-                record['team_id'] = team_id
+                record['season_id'] = season_id
                 record['pool_id'] = pool_id
                 all_matches.append(record)
 
             # Organizations:
             for record in scraped_data.get('organizations', []):
-                record['team_id'] = team_id
+                record['season_id'] = season_id
                 record['pool_id'] = pool_id
                 all_organizations.append(record)
 
-            successful_combinations.append((team_id, pool_id))
-            logger.info(f"Successfully collected data for league {team_id}, Pool {pool_id}")
+            successful_combinations.append((season_id, pool_id))
+            logger.info(f"Successfully collected data for league {season_id}, Pool {pool_id}")
 
             random_delay = await random_interval(5)
             await asyncio.sleep(random_delay)
         except Exception as e:
-            logger.error(f"Error processing League {team_id}, Pool {pool_id}: {str(e)}")
-            failed_combinations.append(team_id, pool_id)
+            logger.error(f"Error processing League {season_id}, Pool {pool_id}: {str(e)}")
+            failed_combinations.append(season_id, pool_id)
             continue
 
     logger.info(f"Batch collection completed. Success: {len(successful_combinations)}, Failed: {len(failed_combinations)}")
@@ -827,9 +874,9 @@ async def collect_multiple_league_data_archive(team_pool_combinations):
 
 
 async def save_batch_to_excel(batch_data: Dict):
-    team_id = batch_data.get('standings')[0].get('team_id')
+    season_id = batch_data.get('standings')[0].get('season_id')
     timestamp = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%Y-%m-%d_%H:%M:%S")
-    division_name = await division_name_call(team_id)
+    division_name = await division_name_call(season_id)
     output_name = f"{division_name}_{timestamp}.xlsx"
     try:
 
@@ -863,10 +910,10 @@ async def save_batch_to_excel(batch_data: Dict):
 
                 # Reorder columns to put identifiers first
                 cols = standings_df.columns.tolist()
-                if 'team_id' in cols and 'pool_id' in cols:
-                    cols.remove('team_id')
+                if 'season_id' in cols and 'pool_id' in cols:
+                    cols.remove('season_id')
                     cols.remove('pool_id')
-                    cols = ['team_id', 'pool_id'] + cols
+                    cols = ['season_id', 'pool_id'] + cols
                     standings_df = standings_df[cols]
 
                 standings_df.to_excel(writer, sheet_name='Standings', index=False)
@@ -877,10 +924,10 @@ async def save_batch_to_excel(batch_data: Dict):
             if batch_data.get('rounds'):
                 rounds_df = pd.DataFrame(batch_data['rounds'])
                 cols = rounds_df.columns.tolist()
-                if 'team_id' in cols and 'pool_id' in cols:
-                    cols.remove('team_id')
+                if 'season_id' in cols and 'pool_id' in cols:
+                    cols.remove('season_id')
                     cols.remove('pool_id')
-                    cols = ['team_id', 'pool_id'] + cols
+                    cols = ['season_id', 'pool_id'] + cols
                     rounds_df = rounds_df[cols]
 
                 rounds_df.to_excel(writer, sheet_name='Rounds', index=False)
@@ -891,10 +938,10 @@ async def save_batch_to_excel(batch_data: Dict):
             if batch_data.get('players'):
                 players_df = pd.DataFrame(batch_data['players'])
                 cols = players_df.columns.tolist()
-                if 'team_id' in cols and 'pool_id' in cols:
-                    cols.remove('team_id')
+                if 'pool_id' in cols:
+                    # cols.remove('season_id')
                     cols.remove('pool_id')
-                    cols = ['team_id', 'pool_id'] + cols
+                    cols = ['pool_id'] + cols
                     players_df = players_df[cols]
 
                 players_df.to_excel(writer, sheet_name='Players', index=False)
@@ -905,10 +952,10 @@ async def save_batch_to_excel(batch_data: Dict):
             if batch_data.get('matches'):
                 matches_df = pd.DataFrame(batch_data['matches'])
                 cols = matches_df.columns.tolist()
-                if 'team_id' in cols and 'pool_id' in cols:
-                    cols.remove('team_id')
+                if 'season_id' in cols and 'pool_id' in cols:
+                    cols.remove('season_id')
                     cols.remove('pool_id')
-                    cols = ['team_id', 'pool_id'] + cols
+                    cols = ['season_id', 'pool_id'] + cols
                     matches_df = matches_df[cols]
 
                 # Remove empty set score columns
@@ -925,10 +972,10 @@ async def save_batch_to_excel(batch_data: Dict):
             if batch_data.get('organizations'):
                 organizations_df = pd.DataFrame(batch_data['organizations'])
                 cols = organizations_df.columns.tolist()
-                if 'team_id' in cols and 'pool_id' in cols:
-                    cols.remove('team_id')
+                if 'season_id' in cols and 'pool_id' in cols:
+                    cols.remove('season_id')
                     cols.remove('pool_id')
-                    cols = ['team_id', 'pool_id'] + cols
+                    cols = ['season_id', 'pool_id'] + cols
                     organizations_df = organizations_df[cols]
 
                 organizations_df.to_excel(writer, sheet_name='Organizations', index=False)
