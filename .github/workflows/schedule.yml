@@ -2,7 +2,7 @@ name: Run RankedIn Data Automation
 
 on:
   schedule:
-    - cron: "47 6-20 * * *"   # every hour at xx:47 UTC → 13 minutes before the next hour
+    - cron: "30 21 * * *"   # Run every day at 21:30 UTC, which is 23:30 in Denmark.
   workflow_dispatch:
 
 jobs:
