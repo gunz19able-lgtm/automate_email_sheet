@@ -1,0 +1,36 @@
+name: Update Matches Data Hourly
+
+on:
+  schedule:
+    - cron: "47 6-20 * * *"   # every hour at xx:47 UTC → 13 minutes before the next hour
+  workflow_dispatch:
+
+jobs:
+  update-matches:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Create Google credentials file
+        run: |
+          echo '${{ secrets.GOOGLE_CREDENTIALS }}' > credentials.json
+
+      - name: Run hourly Matches update
+        env:
+          EMAIL_USER: ${{ secrets.EMAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          LOAD_SPREADSHEET_ID: ${{ secrets.LOAD_SPREADSHEET_ID }}
+          WRITE_SPREADSHEET_ID: ${{ secrets.WRITE_SPREADSHEET_ID }}
+          CLIENT_EMAIL: ${{ secrets.CLIENT_EMAIL }}
+          CLIENT_NAME: ${{ secrets.CLIENT_NAME }}
+        run: python hourly_matches.py
