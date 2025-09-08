@@ -1,4 +1,5 @@
 from google_sheet_automation import load_config_from_sheets, save_hourly_matches_only_to_google_sheets
+from scraper import get_matches
 from tools import random_interval
 from scraper import get_matches
 from datetime import datetime
@@ -133,8 +134,8 @@ async def main():
             return
 
         # Collect only matches data
-        batches = 10
-        random_delay = await random_interval(5)
+        batches = 25
+        random_delay = await random_interval(4)
         matches_data = await collect_matches_data_only(team_id_home, team_id_away, match_ids,  batches, random_delay)
 
         if not matches_data:
@@ -163,4 +164,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
