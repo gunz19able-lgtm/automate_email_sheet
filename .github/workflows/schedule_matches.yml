@@ -2,7 +2,7 @@ name: Update Matches Data Hourly
 
 on:
   schedule:
-    - cron: "47 6-20 * * *"   # every hour at xx:47 UTC → 13 minutes before the next hour
+    - cron: "47 * * * *"   # every hour at xx:47 UTC → 13 minutes before the next hour
   workflow_dispatch:
 
 jobs:
