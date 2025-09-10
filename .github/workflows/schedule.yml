@@ -32,6 +32,8 @@ jobs:
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           LOAD_SPREADSHEET_ID: ${{ secrets.LOAD_SPREADSHEET_ID }}
           WRITE_SPREADSHEET_ID: ${{ secrets.WRITE_SPREADSHEET_ID }}
+          PLAYER_SPREADSHEET_ID: ${{ secrets.PLAYER_SPREADSHEET_ID }}
+          ADDITIONAL_PLAYER_SPREADSHEET_ID: ${{ secrets.ADDITIONAL_PLAYER_SPREADSHEET_ID }}
           CLIENT_EMAIL: ${{ secrets.CLIENT_EMAIL }}
           CLIENT_NAME: ${{ secrets.CLIENT_NAME }}
 
