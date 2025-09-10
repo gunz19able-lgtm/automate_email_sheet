@@ -1,5 +1,5 @@
 from google_sheet_automation import load_league_pool_combinations_from_google_sheets
-from automation import scrape_and_email_batch_tennis_data
+from automation import scrape_and_email_batch_tennis_data_with_player_comparison
 from logger import setup_logger
 from dotenv import load_dotenv
 import asyncio
@@ -23,7 +23,7 @@ async def main():
     cc_recipients = []
     bcc_recipients = []
 
-    success = await scrape_and_email_batch_tennis_data(
+    success = await scrape_and_email_batch_tennis_data_with_player_comparison(
         league_pool_combinations = league_pool_combinations,
         recipients = recipients,
         cc_emails = cc_recipients if cc_recipients else None,
