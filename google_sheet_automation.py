@@ -18,6 +18,174 @@ logger = asyncio.run(setup_logger('google_sheet_automation'))
 load_dotenv()
 LOAD_SPREADSHEET_ID = os.getenv('LOAD_SPREADSHEET_ID')
 WRITE_SPREADSHEET_ID = os.getenv('WRITE_SPREADSHEET_ID')
+PLAYER_SPREADSHEET_ID = os.getenv('PLAYER_SPREADSHEET_ID')
+ADDITIONAL_PLAYER_SPREADSHEET_ID = os.getenv('ADDITIONAL_PLAYER_SPREADSHEET_ID')
+
+
+async def load_players_stats_csv():
+    try:
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive',
+                ]
+
+        creds = Credentials.from_service_account_file('credentials.json', scopes = scope)
+        client = gspread.authorize(creds)
+
+        spreadsheet = client.open_by_key(PLAYER_SPREADSHEET_ID)
+        worksheet = spreadsheet.worksheet('Sheet1')
+
+        data = worksheet.get_all_records()
+
+        players_urls = [row['Player URL'] for row in data]
+
+        return players_urls
+
+    except Exception as e:
+        logger.info(f"Error loading configuration from Google Sheets: {str(e)}")
+
+
+async def compare_player_urls(scraped_players_data, reference_urls):
+    try:
+        scraped_urls = []
+        for player in scraped_players_data:
+            player_url = player.get('Player URL', '')
+            if player_url:
+                scraped_urls.append(player_url)
+
+        scraped_urls_set = set(scraped_urls)
+        reference_urls_set = set(reference_urls)
+
+        matched_urls = scraped_urls_set.intersection(reference_urls_set)
+        unmatched_in_scraped = scraped_urls_set - reference_urls_set
+        unmatched_in_reference = reference_urls_set - scraped_urls_set
+
+        unmatched_players_data = []
+        for player in scraped_players_data:
+            if player.get('Player URL', '') in unmatched_in_scraped:
+                unmatched_players_data.append(player)
+
+        comparison_result = {
+            'total_scraped_urls': len(scraped_urls_set),
+            'total_reference_urls': len(reference_urls_set),
+            'matched_count': len(matched_urls),
+            'unmatched_in_scraped_count': len(unmatched_in_scraped),
+            'unmatched_in_reference_count': len(unmatched_in_reference),
+            'matched_urls': list(matched_urls),
+            'unmatched_in_scraped': list(unmatched_in_scraped),
+            'unmatched_in_reference': list(unmatched_in_reference),
+            'unmatched_players_data': unmatched_players_data
+        }
+
+        logger.info(f"Player URL Comparison Results:")
+        logger.info(f"- Total scraped URLs: {len(scraped_urls_set)}")
+        logger.info(f"- Total reference URLs: {len(reference_urls_set)}")
+        logger.info(f"- Matched URLs: {len(matched_urls)}")
+        logger.info(f"- Unmatched in scraped: {len(unmatched_in_scraped)}")
+        logger.info(f"- Unmatched in reference: {len(unmatched_in_reference)}")
+
+        return comparison_result
+
+    except Exception as e:
+        logger.error(f"Error comparing player URLs: {str(e)}")
+        return {}
+
+
+async def save_addition_new_players_to_google_sheets(comparison_result: Dict, client_email: str = None):
+    try:
+        scope = [
+            'https://spreadsheets.google.com/feeds',
+            'https://www.googleapis.com/auth/drive',
+        ]
+
+        creds = Credentials.from_service_account_file('credentials.json', scopes=scope)
+        client = gspread.authorize(creds)
+
+        # Open existing spreadsheet
+        spreadsheet = client.open_by_key(ADDITIONAL_PLAYER_SPREADSHEET_ID)
+
+        timestamp = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%Y-%m-%d_%H:%M:%S")
+        spreadsheet_name = f"Latest_Additional_Players_Statistics_{timestamp}"
+        spreadsheet.update_title(spreadsheet_name)
+
+        def format_dataframe_for_sheets(df):
+            if df.empty:
+                return []
+
+            headers = df.columns.tolist()
+            data_rows = []
+
+            for _, row in df.iterrows():
+                row_data = []
+                for value in row:
+                    if pd.isna(value):
+                        row_data.append('')
+                    else:
+                        row_data.append(str(value))
+                data_rows.append(row_data)
+
+            return [headers] + data_rows
+
+        def column_number_to_letter(col_num):
+            """Convert column number to Excel-style column letters (1=A, 26=Z, 27=AA, etc.)"""
+            result = ""
+            while col_num > 0:
+                col_num -= 1  # Make it 0-indexed
+                result = chr(65 + (col_num % 26)) + result
+                col_num //= 26
+            return result
+
+        def format_worksheet(worksheet, data):
+            """Format worksheet with headers, freeze, and auto-adjust columns"""
+            if not data:
+                return
+
+            # Clear and update data
+            worksheet.clear()
+            worksheet.update('A1', data)
+
+            # Format headers (gray background and bold)
+            header_range = f'A1:{column_number_to_letter(len(data[0]))}1'
+            worksheet.format(header_range, {
+                'textFormat': {'bold': True},
+                'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
+            })
+
+            # Freeze header row
+            worksheet.freeze(rows=1)
+
+            # Auto-resize columns
+            worksheet.columns_auto_resize(0, len(data[0]) - 1)
+
+        # Save Unmatched Players to Sheet1
+        if comparison_result.get('unmatched_players_data'):
+            unmatched_players_df = pd.DataFrame(comparison_result['unmatched_players_data'])
+
+            unmatched_sheet = spreadsheet.sheet1
+            unmatched_data = format_dataframe_for_sheets(unmatched_players_df)
+            format_worksheet(unmatched_sheet, unmatched_data)
+            await asyncio.sleep(1)
+
+        # Share spreadsheet if email provided
+        if client_email:
+            try:
+                spreadsheet.share(
+                    client_email,
+                    perm_type="user",
+                    role="writer",
+                    notify=True
+                )
+                logger.info(f"Shared Google Sheet with {client_email}")
+            except Exception as e:
+                logger.info(f"Could not share with {client_email}: {str(e)}")
+
+        spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{ADDITIONAL_PLAYER_SPREADSHEET_ID}"
+        logger.info(f"Latest Additional Players Google Sheets created with {len(comparison_result.get('unmatched_players_data', []))} unmatched players: {spreadsheet_url}")
+        return spreadsheet_url
+
+    except Exception as e:
+        logger.info(f"Error saving additional players data to Google Sheets: {str(e)}")
+        return None
 
 
 async def load_config_from_sheets():
@@ -69,14 +237,14 @@ async def load_config_from_sheets():
             'Match ID': safe_to_list(df.get('Match ID', df.get('Match ID', [])))
         }
 
-        print(f"Loaded config data: {len(config_data['Team_ID_Home'])} home teams, "
+        logger.info(f"Loaded config data: {len(config_data['Team_ID_Home'])} home teams, "
               f"{len(config_data['Team_ID_Away'])} away teams, "
               f"{len(config_data['Match ID'])} matches")
 
         return config_data
 
     except Exception as e:
-        print(f"Error loading configuration from Google Sheets: {str(e)}")
+        logger.info(f"Error loading configuration from Google Sheets: {str(e)}")
         return None
 
 
@@ -234,7 +402,7 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
                 return spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
         # Get list of sheets that should NOT be deleted (manual sheets)
-        AUTOMATED_SHEETS = ['Standings', 'Rounds', 'Players', 'Matches', 'Organizations', 'Executive Summary', 'Sheet1']
+        AUTOMATED_SHEETS = ['Standings', 'Rounds', 'Matches', 'Organizations', 'Executive Summary', 'Sheet1']
 
         # Keep track of sheets we've created/updated
         sheets_created = []
@@ -272,22 +440,19 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
             await asyncio.sleep(1)
 
         # Save Players
-        if batch_data.get('players'):
-            players_df = pd.DataFrame(batch_data['players'])
-            cols = players_df.columns.tolist()
-            if 'pool_id' in cols:
-                # cols.remove('season_id')
-                cols.remove('pool_id')
-                cols = ['pool_id'] + cols
-                players_df = players_df[cols]
-
-            players_sheet = get_or_create_sheet('Players')
-            sheets_created.append('Players')
-            players_data = format_dataframe_for_sheets(players_df)
-            format_worksheet_preserve_manual(players_sheet, players_data)
-            await asyncio.sleep(1)
-
-        # Save Matches
+        # if batch_data.get('players'):
+        #     players_df = pd.DataFrame(batch_data['players'])
+        #     cols = players_df.columns.tolist()
+        #     if 'pool_id' in cols:
+        #         # cols.remove('season_id')
+        #         cols.remove('pool_id')
+        #         cols = ['pool_id'] + cols
+        #     players_sheet = get_or_create_sheet('Players')
+        #     sheets_created.append('Players')
+        #     players_data = format_dataframe_for_sheets(players_df)
+        #     format_worksheet_preserve_manual(players_sheet, players_data)
+        #     await asyncio.sleep(1)
+       # Save Matches
         if batch_data.get('matches'):
             matches_df = pd.DataFrame(batch_data['matches'])
             cols = matches_df.columns.tolist()
@@ -333,7 +498,7 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
             ['Success Rate (%)', str(round((len(batch_data.get('successful_combinations', [])) / max(batch_data.get('total_processed', 1), 1)) * 100, 2))],
             ['Total Final Standings Records', str(len(batch_data.get('standings', [])))],
             ['Total Final Rounds Records', str(len(batch_data.get('rounds', [])))],
-            ['Total Final Players Records', str(len(batch_data.get('players', [])))],
+            # ['Total Final Players Records', str(len(batch_data.get('players', [])))],
             ['Total Final Matches Records', str(len(batch_data.get('matches', [])))],
             ['Total Final Organizations Records', str(len(batch_data.get('organizations', [])))],
             ['Report Generated', datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
