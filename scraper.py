@@ -1,4 +1,4 @@
-from tools import make_requests, random_useragent, random_interval
+from tools import make_requests, random_useragent, random_interval, convert_unix_timestamp
 from logger import setup_logger
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -59,12 +59,41 @@ async def get_ranking_position_of_players(player_id):
     api_url = f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={player_id}"
 
     try:
-        response = await make_requests(api_url, headers = headers)
-        ranking_position = response.json()[0][-1]['Standing']
+        response = await make_requests(api_url, headers=headers)
+        ranking_position = response.json()
+
+        latest_timestamp = 0
+        latest_standing = None
+
+        # Iterate through all rankings to find the latest timestamp
+        for idx in range(len(ranking_position)):
+            ranking_lists = ranking_position[idx]
+            for jdx in range(len(ranking_lists)):
+                unix_timestamp = ranking_lists[jdx]['UnixTimestamp']
+                standing = ranking_lists[jdx]['Standing']
+                ranking_name = ranking_lists[idx]['RankingName']
+
+                # Keep track of the latest timestamp and its standing
+                if unix_timestamp > latest_timestamp:
+                    latest_timestamp = unix_timestamp
+                    latest_standing = standing
+                    latest_ranking_name = ranking_name
+
+        # Convert and display the latest timestamp
+        if latest_timestamp > 0:
+            latest_date = await convert_unix_timestamp(latest_timestamp)
+            print(f"Latest timestamp: {latest_date}")
+            print(f"Standing for latest timestamp: {latest_standing}")
+
+            # Return both standing and timestamp as a tuple
+            return latest_standing, latest_date, ranking_name
+        else:
+            print("No valid timestamps found")
+            return None, None, None
 
     except Exception as e:
-        ranking_position = ""
-    return ranking_position
+        print(f"Error: {str(e)}")
+        return None, None, None
 
 
 async def get_players(season_id):
@@ -91,22 +120,30 @@ async def get_players(season_id):
         # Extract player IDs for ranking position lookup
         player_ids = [player_data['Id'] for player_data in players_lists]
 
-        # Get ranking positions concurrently
+        # Get ranking positions, timestamps, and ranking names concurrently
         ranking_map = {}
+        timestamp_map = {}
+        ranking_name_map = {}
         if player_ids:
             logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {season_id}...")
             ranking_tasks = [get_ranking_position_of_players(player_id) for player_id in player_ids]
             ranking_results = await asyncio.gather(*ranking_tasks, return_exceptions=True)
 
-            # Create a mapping of player_id to ranking position
+            # Create mappings of player_id to ranking position, timestamp, and ranking name
             for i, result in enumerate(ranking_results):
                 if isinstance(result, Exception):
                     logger.error(f"Error getting ranking for player {player_ids[i]}: {result}")
                     ranking_map[player_ids[i]] = ""
+                    timestamp_map[player_ids[i]] = ""
+                    ranking_name_map[player_ids[i]] = ""
                 else:
-                    ranking_map[player_ids[i]] = result
+                    # Unpack the tuple returned from get_ranking_position_of_players
+                    standing, timestamp, ranking_name = result
+                    ranking_map[player_ids[i]] = standing if standing is not None else ""
+                    timestamp_map[player_ids[i]] = timestamp if timestamp is not None else ""
+                    ranking_name_map[player_ids[i]] = ranking_name if ranking_name is not None else ""
 
-        # Build player data with ranking positions
+        # Build player data with ranking positions, timestamps, and ranking names
         for idx in range(len(players_lists)):
             player_datas = players_lists[idx]
             player_id = player_datas['Id']
@@ -118,7 +155,9 @@ async def get_players(season_id):
                 'Team League Name': raw_datas['TeamLeagueName'],
                 'State Message': raw_datas['StateMessage'],
                 'Player ID': player_id,
-                'Ranking Position': ranking_map.get(player_id, ""),  # Use actual ranking position
+                'Ranking Position': ranking_map.get(player_id, ""),
+                'Ranking Timestamp': timestamp_map.get(player_id, ""),
+                'Ranking Name': ranking_name_map.get(player_id, ""),  # Add ranking name field
                 'RankedInId': player_datas['RankedinId'],
                 'Name': player_datas['FirstName'],
                 'Player Order': player_datas['PlayerOrder'],
@@ -131,7 +170,8 @@ async def get_players(season_id):
                 'Home Club Name': player_datas['HomeClub']['Name'],
                 'Home Club Country': player_datas['HomeClub']['CountryShort'],
                 'Home Club City': player_datas['HomeClub']['City'],
-                'Home Club URL': f"https://rankedin.com{player_datas['HomeClub']['Url']}"
+                'Home Club URL': f"https://rankedin.com{player_datas['HomeClub']['Url']}",
+                'Ranking API URL': f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={player_id}",
             }
 
             players_listings_dicts.append(datas)
@@ -587,18 +627,18 @@ async def get_standings_rounds_data(league_id, pool_id):
         return None
 
 
-async def collect_data_concurrently(Season_ID_Home, Season_ID_Away, match_ids):
+async def collect_data_concurrently(season_id_home, season_id_away, match_ids):
     """
     Collect players, matches, and organizations data concurrently
     """
     logger.info("Starting concurrent data collection...")
 
     # Combine home and away team IDs for unique team collection
-    all_season_ids = Season_ID_Home + Season_ID_Away
+    all_season_ids = season_id_home + season_id_away
     unique_season_ids = list(set(all_season_ids))
 
     # Create team-match tuples with home/away distinction for matches
-    team_match_tuples = list(zip(Season_ID_Home, Season_ID_Away, match_ids))
+    team_match_tuples = list(zip(season_id_home, season_id_away, match_ids))
 
     # Collect players data concurrently (now includes ranking positions)
     logger.info(f"Collecting players data for {len(unique_season_ids)} teams concurrently...")
@@ -710,14 +750,14 @@ async def collect_all_league_data(league_id, pool_id):
 
 async def collect_multiple_league_data(team_pool_combinations, delay, batches):
     """
-    Replace your existing collect_multiple_league_data function with this one
+    Collect all data and separate players data for individual processing
     """
     # Split combinations into batches of 5
     batches = [team_pool_combinations[i:i + batches] for i in range(0, len(team_pool_combinations), batches)]
 
     all_standings = []
     all_rounds = []
-    all_players = []
+    all_players = []  # Keep collecting players data
     all_matches = []
     all_organizations = []
     successful_combinations = []
@@ -755,7 +795,7 @@ async def collect_multiple_league_data(team_pool_combinations, delay, batches):
                     all_rounds.append(record)
 
                 for record in scraped_data.get('players', []):
-                    # record['season_id'] = season_id
+                    record['season_id'] = season_id  # Add season_id for players too
                     record['pool_id'] = pool_id
                     all_players.append(record)
 
@@ -787,13 +827,14 @@ async def collect_multiple_league_data(team_pool_combinations, delay, batches):
     return {
         'standings': all_standings,
         'rounds': all_rounds,
-        'players': all_players,
+        'players': all_players,  # Include players in return data
         'matches': all_matches,
         'organizations': all_organizations,
         'successful_combinations': successful_combinations,
         'failed_combinations': failed_combinations,
         'total_processed': len(team_pool_combinations)
     }
+
 
 
 async def collect_multiple_league_data_archive(team_pool_combinations):
@@ -875,7 +916,7 @@ async def collect_multiple_league_data_archive(team_pool_combinations):
 
 async def save_batch_to_excel(batch_data: Dict):
     season_id = batch_data.get('standings')[0].get('season_id')
-    timestamp = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%Y-%m-%d_%H:%M:%S")
+    timestamp = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%Y-%m-%d_%H_%M_%S")
     division_name = await division_name_call(season_id)
     output_name = f"{division_name}_{timestamp}.xlsx"
     try:
@@ -935,18 +976,18 @@ async def save_batch_to_excel(batch_data: Dict):
                 logger.info(f"Saved {len(rounds_df)} final rounds records.")
 
             # Save consolidated players data
-            if batch_data.get('players'):
-                players_df = pd.DataFrame(batch_data['players'])
-                cols = players_df.columns.tolist()
-                if 'pool_id' in cols:
-                    # cols.remove('season_id')
-                    cols.remove('pool_id')
-                    cols = ['pool_id'] + cols
-                    players_df = players_df[cols]
+            # if batch_data.get('players'):
+            #     players_df = pd.DataFrame(batch_data['players'])
+            #     cols = players_df.columns.tolist()
+            #     if 'pool_id' in cols:
+            #         # cols.remove('season_id')
+            #         cols.remove('pool_id')
+            #         cols = ['pool_id'] + cols
+            #         players_df = players_df[cols]
 
-                players_df.to_excel(writer, sheet_name='Players', index=False)
-                format_worksheet(writer.sheets['Players'], players_df)
-                logger.info(f'Saved {len(players_df)} final players records')
+            #     players_df.to_excel(writer, sheet_name='Players', index=False)
+            #     format_worksheet(writer.sheets['Players'], players_df)
+            #     logger.info(f'Saved {len(players_df)} final players records')
 
             # Save consolidated matches data
             if batch_data.get('matches'):
@@ -991,7 +1032,7 @@ async def save_batch_to_excel(batch_data: Dict):
                     'Success Rate (%)',
                     'Total Final Standings Records',
                     'Total Final Rounds Records',
-                    'Total Final Players Records',
+                    # 'Total Final Players Records',
                     'Total Final Matches Records',
                     'Total Final Organizations Records',
                     'Report Generated'
@@ -1003,7 +1044,7 @@ async def save_batch_to_excel(batch_data: Dict):
                     round((len(batch_data.get('successful_combinations', [])) / max(batch_data.get('total_processed', 1), 1)) * 100, 2),
                     len(batch_data.get('standings', [])),
                     len(batch_data.get('rounds', [])),
-                    len(batch_data.get('players', [])),
+                    # len(batch_data.get('players', [])),
                     len(batch_data.get('matches', [])),
                     len(batch_data.get('organizations', [])),
                     datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -1047,7 +1088,7 @@ async def save_batch_to_excel(batch_data: Dict):
         return None
 
 
-async def save_all_to_excel(standings_data, rounds_data, players_data, matches_data, organizations_data, filename):
+async def save_all_to_excel(standings_data, rounds_data, matches_data, organizations_data, filename):
     """
     Save all collected data to separate sheets in an Excel file
     """
@@ -1062,8 +1103,8 @@ async def save_all_to_excel(standings_data, rounds_data, players_data, matches_d
             if rounds_data:
                 pd.DataFrame(rounds_data).to_excel(writer, sheet_name='Rounds', index=False)
             # Save players data
-            if players_data:
-                pd.DataFrame(players_data).to_excel(writer, sheet_name='Players', index=False)
+            # if players_data:
+            #     pd.DataFrame(players_data).to_excel(writer, sheet_name='Players', index=False)
             if matches_data:
             # Save matches data
                 # Convert list of dictionaries to DataFrame
@@ -1083,5 +1124,5 @@ async def save_all_to_excel(standings_data, rounds_data, players_data, matches_d
 
     except Exception as e:
         logger.error(f"Error saving to Excel: {str(e)}")
-        return None  # ← ADD THIS LINE - Return None on failure
+        return None 
 
