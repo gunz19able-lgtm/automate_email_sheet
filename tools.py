@@ -6,10 +6,38 @@ import pandas as pd
 import itertools
 import asyncio
 import random
+from datetime import datetime
+import pytz
 import os
 
 
 logger = asyncio.run(setup_logger('tools'))
+
+
+async def convert_unix_timestamp(timestamp):
+    """
+    Convert Unix timestamp to human-readable date
+    Handles both seconds and milliseconds timestamps
+    """
+    if pd.isna(timestamp) or timestamp == '' or timestamp == 0:
+        return ''
+
+    try:
+        # Convert to float first
+        timestamp = float(timestamp)
+
+        # If timestamp is in seconds (10 digits), convert to milliseconds
+        if timestamp < 10000000000:
+            timestamp = timestamp * 1000
+
+        # Convert to datetime
+        dt = datetime.fromtimestamp(timestamp / 1000)
+
+        # Return formatted date string
+        return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    except (ValueError, OSError, OverflowError):
+        return ''
 
 
 async def flat(d_lists):
@@ -83,5 +111,4 @@ async def save_to_excel(standings_dataframe, rounds_dataframe, players_dataframe
 
     # IMPORTANT: Return the file path
     return file_path
-
 
