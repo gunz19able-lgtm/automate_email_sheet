@@ -1,5 +1,5 @@
 from scraper import collect_multiple_league_data, save_batch_to_excel
-from google_sheet_automation import save_batch_to_google_sheets
+from google_sheet_automation import save_batch_to_google_sheets, load_players_stats_csv, compare_player_urls, save_addition_new_players_to_google_sheets
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from typing import List, Optional, Tuple
@@ -7,6 +7,7 @@ from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from logger import setup_logger
 from dotenv import load_dotenv
+from typing import Dict
 from zoneinfo import ZoneInfo
 from datetime import datetime
 from email import encoders
@@ -26,6 +27,7 @@ EMAIL_PASS = os.getenv("EMAIL_PASS")
 CLIENT_NAME = os.getenv('CLIENT_NAME')
 
 logger = asyncio.run(setup_logger('tennis_automation'))
+
 
 
 async def send_email_with_attachment(
@@ -68,41 +70,35 @@ async def send_email_with_attachment(
 
         msg.attach(text_msg)
 
-        # Handle attachment
+        # Handle attachment - SINGLE ATTACHMENT ONLY
         if attachment_path and os.path.exists(attachment_path):
+            # Get the actual filename (like "Lunar Ligaen - Efterår 2025_2025-09-09_22:44:03.xlsx")
             filename = os.path.basename(attachment_path)
+
+            # Read the file
             with open(attachment_path, "rb") as f:
                 attachment_data = f.read()
 
-            attachment_part = MIMEApplication(attachment_data, Name=filename)
-            attachment_part['Content-Disposition'] = f'attachment; filename="{filename}"'
-            msg.attach(attachment_part)
+            # Create the attachment part
+            attachment_part = MIMEApplication(attachment_data)
 
-
-            # Determine MIME type
-            if filename.endswith('.xlsx'):
-                mime_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-            elif filename.endswith('.xls'):
-                mime_type = 'application/vnd.ms-excel'
-            else:
-                mime_type, _ = mimetypes.guess_type(attachment_path)
-                if not mime_type:
-                    mime_type = 'application/octet-stream'
-
-            # Create attachment part
-            attachment_part = MIMEApplication(attachment_data, Name=filename)
-            attachment_part['Content-Disposition'] = f'attachment; filename="{filename}"'
-            msg.attach(attachment_part)
-
-            # Add headers
+            # Set the proper filename in Content-Disposition header
             attachment_part.add_header(
                 'Content-Disposition',
-                f'attachment; filename="{filename}"'
+                'attachment',
+                filename=filename  # This preserves your timestamped filename
             )
-            attachment_part.add_header('Content-Type', mime_type)
-            attachment_part.add_header('Content-Transfer-Encoding', 'base64')
 
+            # Set Content-Type for Excel files
+            if filename.endswith('.xlsx'):
+                attachment_part.add_header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            elif filename.endswith('.xls'):
+                attachment_part.add_header('Content-Type', 'application/vnd.ms-excel')
+
+            # Attach to message - ONLY ONCE
             msg.attach(attachment_part)
+
+            print(f"Attached file: {filename}")
 
         # Send email
         with smtplib.SMTP(smtp_server, smtp_port) as server:
@@ -117,30 +113,174 @@ async def send_email_with_attachment(
 
             server.sendmail(from_email, recipients, msg.as_string())
 
-        print(f"✅ Email sent successfully to {len(recipients)} recipient(s)")
+        print(f"Email sent successfully to {len(recipients)} recipient(s)")
         return True
 
     except Exception as e:
-        print(f"❌ Failed to send email: {str(e)}")
+        print(f"Failed to send email: {str(e)}")
         import traceback
         print(f"Traceback: {traceback.format_exc()}")
         return False
 
 
-async def send_batch_tennis_report_email(
+async def scrape_and_email_batch_tennis_data_with_player_comparison(
+    league_pool_combinations: List[Tuple[str, str]],
+    recipients: List[str],
+    cc_emails: Optional[List[str]] = None,
+    bcc_emails: Optional[List[str]] = None,
+    client_email: Optional[str] = None,
+    include_google_sheets: bool = True,
+    delay: float = None,
+    batches: int = None,
+):
+    """Enhanced function that includes player URL comparison in the main workflow"""
+    try:
+        logger.info(f"Starting enhanced batch scrape and email workflow for {len(league_pool_combinations)} combinations")
+
+        # Step 1: Scrape all the data for multiple combinations
+        logger.info("Step 1: Starting batch data scraping...")
+        batch_data = await collect_multiple_league_data(league_pool_combinations, delay, batches)
+
+        if not batch_data or not batch_data.get('successful_combinations'):
+            logger.error("No data was successfully scraped from any combination")
+            return False
+
+        logger.info("Batch data scraping completed successfully!")
+
+        # Step 2: Load reference player URLs from Google Sheets
+        logger.info("Step 2: Loading reference player URLs...")
+        reference_urls = await load_players_stats_csv()
+
+        if not reference_urls:
+            logger.warning("No reference URLs loaded from Google Sheets")
+
+        # Step 3: Compare player URLs
+        logger.info("Step 3: Comparing player URLs...")
+        comparison_result = await compare_player_urls(batch_data.get('players', []), reference_urls)
+
+        # Step 4: Save unmatched data to Google Sheets (if there are unmatched URLs)
+        # FIX: Disable notification for additional players sheet to avoid duplicate emails
+        unmatched_players_sheet_url = None
+        if include_google_sheets:
+            if comparison_result.get('unmatched_in_scraped_count', 0) > 0:
+                logger.info("Step 4: Saving latest additional players to Google Sheets...")
+                # Pass notify=False or modify the function to not send notifications
+                try:
+                    unmatched_players_sheet_url = await save_addition_new_players_to_google_sheets(
+                        comparison_result,
+                        None,
+
+                    )
+                    if unmatched_players_sheet_url:
+                        logger.info('Google sheets for Additional Players created successfully')
+                    else:
+                        logger.warning("Failed to create Additional Player Google Sheets document")
+                except Exception as gs_error:
+                    logger.warning(f"Google Sheets creation failed: {str(gs_error)}")
+
+        # Step 5: Save main batch data to Excel
+        logger.info("Step 5: Saving batch data to Excel...")
+        excel_filename = await save_batch_to_excel(batch_data)
+
+        if not excel_filename or not os.path.exists(excel_filename):
+            logger.error("Failed to create Excel file")
+            return False
+
+        logger.info(f"Excel file created successfully: {excel_filename}")
+
+        # Step 6: Save main batch data to Google Sheets
+        # FIX: Only notify for main sheet, not additional players sheet
+        google_sheets_url = None
+        if include_google_sheets:
+            logger.info("Step 6: Saving batch data to Google Sheets...")
+            try:
+                google_sheets_url = await save_batch_to_google_sheets(
+                    batch_data,
+                    None,
+                )
+                if google_sheets_url:
+                    logger.info(f"Google Sheets created successfully: {google_sheets_url}")
+                else:
+                    logger.warning("Failed to create Google Sheets document")
+            except Exception as gs_error:
+                logger.warning(f"Google Sheets creation failed: {str(gs_error)}")
+
+        # Step 7: Configure SMTP settings
+        smtp_config = {
+            'server': 'smtp.gmail.com',
+            'port': 587,
+            'username': EMAIL_USER,
+            'password': EMAIL_PASS,
+            'from_email': EMAIL_USER,
+        }
+
+        if not EMAIL_USER or not EMAIL_PASS:
+            logger.error("Email credentials not found in environment variables")
+            return False
+
+        # Step 8: Send enhanced email with player comparison data
+        # ADD: Extra logging to debug attachment issues
+        logger.info("Step 8: Sending enhanced email with batch data and player comparison...")
+        logger.info(f"About to send email with attachment: {excel_filename}")
+        logger.info(f"File exists: {os.path.exists(excel_filename)}")
+        logger.info(f"File size: {os.path.getsize(excel_filename) if os.path.exists(excel_filename) else 'N/A'} bytes")
+
+        email_success = await send_batch_tennis_report_email_with_player_analysis(
+            smtp_config=smtp_config,
+            to_emails=recipients,
+            excel_file_path=excel_filename,
+            batch_summary=batch_data,
+            comparison_result=comparison_result,
+            cc_emails=cc_emails,
+            bcc_emails=bcc_emails,
+            google_sheets_url=google_sheets_url,
+            unmatched_players_sheet_url=unmatched_players_sheet_url
+        )
+
+        if email_success:
+            logger.info("Enhanced batch email sent successfully!")
+            logger.info(f"Report sent to: {', '.join(recipients)}")
+            if cc_emails:
+                logger.info(f"CC: {', '.join(cc_emails)}")
+            if bcc_emails:
+                logger.info(f"BCC: {', '.join(bcc_emails)}")
+
+            # Log summaries
+            logger.info(f"Total combinations processed: {batch_data.get('total_processed', 0)}")
+            logger.info(f"Successful: {len(batch_data.get('successful_combinations', []))}")
+            logger.info(f"Failed: {len(batch_data.get('failed_combinations', []))}")
+            logger.info(f"Player URL comparison - Matched: {comparison_result.get('matched_count', 0)}, Unmatched: {comparison_result.get('unmatched_in_scraped_count', 0)}")
+        else:
+            logger.error("Enhanced batch email sending failed!")
+
+        return email_success
+
+    except Exception as e:
+        logger.error(f"Error in enhanced batch scrape and email workflow: {str(e)}")
+        logger.error(f"Error type: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return False
+
+
+async def send_batch_tennis_report_email_with_player_analysis(
     smtp_config: dict,
     to_emails: List[str],
     excel_file_path: str,
     batch_summary: dict,
+    comparison_result: dict,
     cc_emails: Optional[List[str]] = None,
-    bcc_emails: Optional[List[str]] = None
+    bcc_emails: Optional[List[str]] = None,
+    google_sheets_url: Optional[str] = None,
+    unmatched_players_sheet_url: Optional[str] = None
 ) -> bool:
+    """Alternative email template with cleaner design"""
 
     # Email subject
     timestamp = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%Y-%m-%d_%H:%M:%S")
-    subject = f"🎾 RankedIn League Data Report - {timestamp}"
+    subject = f"Tennis League Analytics Report - {timestamp}"
 
-    # HTML email body with professional styling
+    # Alternative HTML email body with minimal, professional design
     html_body = f"""
     <!DOCTYPE html>
     <html>
@@ -148,126 +288,265 @@ async def send_batch_tennis_report_email(
         <meta charset="UTF-8">
         <style>
             body {{
-                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                font-family: Arial, sans-serif;
                 line-height: 1.6;
-                color: #333;
-                max-width: 600px;
+                color: #2c3e50;
+                max-width: 650px;
                 margin: 0 auto;
-                padding: 20px;
-                background-color: #f8f9fa;
+                padding: 0;
+                background-color: #ffffff;
             }}
-            .container {{
-                background-color: white;
-                padding: 30px;
-                border-radius: 10px;
-                box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            }}
-            .header {{
-                border-bottom: 3px solid #28a745;
-                padding-bottom: 15px;
-                margin-bottom: 25px;
-            }}
-            .header h2 {{
-                color: #28a745;
-                margin: 0;
-                font-size: 24px;
-            }}
-            .summary-section {{
-                background-color: #f8f9fa;
-                padding: 20px;
+            .email-container {{
+                background-color: #ffffff;
+                border: 1px solid #e1e5e9;
                 border-radius: 8px;
-                margin: 20px 0;
-                border-left: 4px solid #007bff;
+                overflow: hidden;
             }}
-            .data-summary {{
-                background-color: #e9ecef;
+            .header-strip {{
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                padding: 25px 30px;
+                color: white;
+                text-align: center;
+            }}
+            .header-strip h1 {{
+                margin: 0;
+                font-size: 22px;
+                font-weight: 600;
+            }}
+            .header-strip p {{
+                margin: 5px 0 0 0;
+                opacity: 0.9;
+                font-size: 14px;
+            }}
+            .content-body {{
+                padding: 30px;
+            }}
+            .greeting {{
+                font-size: 16px;
+                margin-bottom: 20px;
+            }}
+            .report-section {{
+                background-color: #f8f9fa;
+                border-radius: 6px;
+                padding: 20px;
+                margin: 25px 0;
+                border-left: 4px solid #667eea;
+            }}
+            .report-title {{
+                color: #495057;
+                font-size: 18px;
+                font-weight: 600;
+                margin: 0 0 15px 0;
+            }}
+            .info-row {{
+                display: flex;
+                justify-content: space-between;
+                margin-bottom: 8px;
+                padding: 5px 0;
+                border-bottom: 1px solid #e9ecef;
+            }}
+            .info-row:last-child {{
+                border-bottom: none;
+            }}
+            .info-label {{
+                font-weight: 500;
+                color: #6c757d;
+            }}
+            .info-value {{
+                color: #495057;
+                font-weight: 600;
+            }}
+            .metrics-container {{
+                background-color: #ffffff;
+                border: 1px solid #e9ecef;
+                border-radius: 6px;
+                padding: 20px;
+                margin: 20px 0;
+            }}
+            .metrics-grid {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+                gap: 15px;
+                text-align: center;
+            }}
+            .metric-item {{
+                padding: 12px;
+                background-color: #f8f9fa;
+                border-radius: 4px;
+                border: 1px solid #e9ecef;
+            }}
+            .metric-number {{
+                font-size: 20px;
+                font-weight: 700;
+                color: #667eea;
+                display: block;
+            }}
+            .metric-label {{
+                font-size: 11px;
+                color: #6c757d;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+                margin-top: 4px;
+            }}
+            .additional-stats {{
+                background-color: #e8f4fd;
+                border-radius: 6px;
+                padding: 18px;
+                margin: 20px 0;
+                border-left: 4px solid #17a2b8;
+            }}
+            .links-section {{
+                background-color: #f8f9fa;
                 padding: 15px;
                 border-radius: 6px;
                 margin: 20px 0;
-                font-family: monospace;
-                text-align: center;
+                border: 1px solid #e9ecef;
             }}
-            .signature {{
-                margin-top: 30px;
-                padding-top: 20px;
-                border-top: 2px solid #e9ecef;
-            }}
-            .signature-content {{
-                display: flex;
-                align-items: flex-start;
-                gap: 15px;
-            }}
-            .signature-text {{
-                flex: 1;
-            }}
-            .signature-name {{
-                font-weight: bold;
+            .links-section h4 {{
+                color: #495057;
+                margin: 0 0 10px 0;
                 font-size: 16px;
-                color: #2c3e50;
-                margin-bottom: 5px;
             }}
-            .signature-title {{
-                color: #7f8c8d;
-                font-size: 14px;
-                margin-bottom: 10px;
+            .link-item {{
+                margin: 8px 0;
+                padding: 8px 12px;
+                background-color: #ffffff;
+                border-radius: 4px;
+                border: 1px solid #dee2e6;
             }}
-            .signature-contact {{
-                font-size: 12px;
-                line-height: 1.4;
-            }}
-            .signature-contact a {{
-                color: #3498db;
+            .link-item a {{
+                color: #667eea;
                 text-decoration: none;
+                font-weight: 500;
             }}
-            .signature-contact a:hover {{
+            .link-item a:hover {{
                 text-decoration: underline;
             }}
-            .highlight {{
+            .footer-section {{
+                margin-top: 40px;
+                padding-top: 20px;
+                border-top: 2px solid #e9ecef;
+                text-align: center;
+            }}
+            .signature-card {{
+                background-color: #f8f9fa;
+                padding: 20px;
+                border-radius: 6px;
+                text-align: left;
+                display: inline-block;
+                margin: 0 auto;
+            }}
+            .sig-name {{
+                font-weight: 600;
+                font-size: 16px;
+                color: #2c3e50;
+                margin-bottom: 4px;
+            }}
+            .sig-title {{
+                color: #6c757d;
+                font-size: 13px;
+                margin-bottom: 12px;
+            }}
+            .sig-links {{
+                font-size: 12px;
+                line-height: 1.5;
+            }}
+            .sig-links a {{
+                color: #667eea;
+                text-decoration: none;
+            }}
+            .attachment-note {{
                 background-color: #fff3cd;
-                padding: 2px 6px;
+                border: 1px solid #ffeaa7;
+                padding: 12px;
                 border-radius: 4px;
-                font-weight: 500;
+                margin: 15px 0;
+                font-size: 14px;
+                color: #856404;
             }}
         </style>
     </head>
     <body>
-        <div class="container">
-            <div class="header">
-                <h2>🎾 RankedIn League Data Report</h2>
-                <p style="margin: 5px 0; color: #6c757d;">Comprehensive Tennis League Analytics</p>
+        <div class="email-container">
+            <div class="header-strip">
+                <h1>🎾 RankedIn League Data Report</h1>
+                <p>Automated Data Analysis & Player Statistics</p>
             </div>
 
-            <p>Hi {CLIENT_NAME},</p>
+            <div class="content-body">
+                <div class="greeting">
+                    Hi {CLIENT_NAME},
+                </div>
 
-            <p>Please find attached the comprehensive league data report for your review. This automated report contains the latest league statistics.</p>
+                <p>Here's your daily automated report containing two comprehensive analyses; the main RankedIn league data and the Latest Additional Players.</p>
 
-            <div class="summary-section">
-                <h3 style="margin-top: 0; color: #495057;">📊 Report Summary</h3>
-                <p><strong>Generated:</strong> {datetime.now(ZoneInfo('Europe/Copenhagen')).strftime('%A, %B %d, %Y at %I:%M %p')}</p>
-                <p><strong>File:</strong> <span class="highlight">{os.path.basename(excel_file_path)}</span></p>
-                <p><strong>Total League/Pool Combinations:</strong> {batch_summary.get('total_processed', 0)}</p>
-            </div>
+                <div class="report-section">
+                    <div class="report-title">League Data Summary</div>
+                    <div class="info-row">
+                        <span class="info-label">Report Generated</span>
+                        <span class="info-value">{datetime.now(ZoneInfo('Europe/Copenhagen')).strftime('%B %d, %Y at %I:%M %p')}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Excel File</span>
+                        <span class="info-value">{os.path.basename(excel_file_path)}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">League Combinations</span>
+                        <span class="info-value">{batch_summary.get('total_processed', 0)}</span>
+                    </div>
+                </div>
 
-            <h3 style="color: #495057;">📈 Data Summary</h3>
-            <div class="data-summary">
-                <strong>Standings:</strong> {len(batch_summary.get('standings', []))} |
-                <strong>Rounds:</strong> {len(batch_summary.get('rounds', []))} |
-                <strong>Players:</strong> {len(batch_summary.get('players', []))} |
-                <strong>Matches:</strong> {len(batch_summary.get('matches', []))} |
-                <strong>Organizations:</strong> {len(batch_summary.get('organizations', []))}
-            </div>
+                <div class="metrics-container">
+                    <div class="metrics-grid">
+                        <div class="metric-item">
+                            <span class="metric-number">{len(batch_summary.get('standings', []))}</span>
+                            <div class="metric-label">Standings</div>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-number">{len(batch_summary.get('rounds', []))}</span>
+                            <div class="metric-label">Rounds</div>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-number">{len(batch_summary.get('matches', []))}</span>
+                            <div class="metric-label">Matches</div>
+                        </div>
+                        <div class="metric-item">
+                            <span class="metric-number">{len(batch_summary.get('organizations', []))}</span>
+                            <div class="metric-label">Organizations</div>
+                        </div>
+                    </div>
+                </div>
 
-            <div class="signature">
-                <div class="signature-content">
-                    <div class="signature-text">
-                        <div class="signature-name">Sushil Bhandari</div>
-                        <div class="signature-title">Python Developer | Web Scraping & Automation Specialist</div>
-                        <div class="signature-contact">
-                            📱 <a href="tel:+977-9849892938">+977-9849892938</a><br>
-                            🔗 <a href="https://www.upwork.com/freelancers/~017c0d983bfe5ba79f" target="_blank">Upwork</a> |
-                            <a href="https://www.linkedin.com/in/sushil-b-46594420a//" target="_blank">LinkedIn</a> |
-                            <a href="https://github.com/sushil-rgb" target="_blank">GitHub</a> |
-                            <a href="https://sushil-bhandari.com.np" target="_blank">Website</a>
+                <div class="additional-stats">
+                    <div class="report-title">Additional Players</div>
+                    <div style="text-align: center; padding: 10px;">
+                        <span style="font-size: 24px; font-weight: 700; color: #17a2b8;">{comparison_result.get('unmatched_in_scraped_count', 0)}</span>
+                        <div style="font-size: 12px; color: #6c757d; margin-top: 5px;">New Players Identified</div>
+                    </div>
+                </div>
+
+                {f'''
+                <div class="links-section">
+                    <h4>Access Your Data</h4>
+                    {f'<div class="link-item">📊 <a href="{google_sheets_url}" target="_blank">RankedIn League Data Spreadsheet</a></div>' if google_sheets_url else ''}
+                    {f'<div class="link-item">👥 <a href="{unmatched_players_sheet_url}" target="_blank">New Additional Players Datasheet</a></div>' if unmatched_players_sheet_url else ''}
+                </div>
+                ''' if google_sheets_url or unmatched_players_sheet_url else ''}
+
+                <div class="attachment-note">
+                    <strong>📎 Attachment:</strong> Complete RankedIn dataset is available in the attached Excel file.
+                </div>
+
+                <div class="footer-section">
+                    <div class="signature-card">
+                        <div class="sig-name">Sushil Bhandari</div>
+                        <div class="sig-title">Python Developer & Automation Specialist</div>
+                        <div class="sig-links">
+                            📱 +977-9849892938<br>
+                            🔗 <a href="https://www.upwork.com/freelancers/~017c0d983bfe5ba79f">Upwork Profile</a> |
+                            <a href="https://www.linkedin.com/in/sushil-b-46594420a/">LinkedIn</a><br>
+                            💻 <a href="https://github.com/sushil-rgb">GitHub</a> |
+                            <a href="https://sushil-bhandari.com.np">Portfolio</a>
                         </div>
                     </div>
                 </div>
@@ -277,30 +556,40 @@ async def send_batch_tennis_report_email(
     </html>
     """
 
-    # Plain text version for email clients that don't support HTML
+    # Plain text version
     text_body = f"""
-    RankedIn League Data Report - {timestamp}
+    🎾 RankedIn League Data Report - {timestamp}
 
     Hi {CLIENT_NAME},
 
-    Please find attached the comprehensive league data report.
+    Here's your daily automated report containing two comprehensive analyses; the main RankedIn league data and the Latest Additional Players.
 
-    Report Details:
-    • Generated: {datetime.now(ZoneInfo('Europe/Copenhagen')).strftime('%Y-%m-%d %H:%M:%S')}
-    • File: {os.path.basename(excel_file_path)}
-    • Total League/Pool Combinations: {batch_summary.get('total_processed', 0)}
+    LEAGUE DATA SUMMARY
+    Report Generated: {datetime.now(ZoneInfo('Europe/Copenhagen')).strftime('%B %d, %Y at %I:%M %p')}
+    Excel File: {os.path.basename(excel_file_path)}
+    League Combinations: {batch_summary.get('total_processed', 0)}
 
-    Data Summary: Standings: {len(batch_summary.get('standings', []))} | Rounds: {len(batch_summary.get('rounds', []))} | Players: {len(batch_summary.get('players', []))} | Matches: {len(batch_summary.get('matches', []))} | Organizations: {len(batch_summary.get('organizations', []))}
+    DATA METRICS
+    Standings: {len(batch_summary.get('standings', []))}
+    Rounds: {len(batch_summary.get('rounds', []))}
+    Matches: {len(batch_summary.get('matches', []))}
+    Organizations: {len(batch_summary.get('organizations', []))}
 
-    Best regards,
+    ADDITIONAL PLAYER ANALYSIS
+    New Players Identified: {comparison_result.get('unmatched_in_scraped_count', 0)}
 
+    ACCESS YOUR DATA
+    {f'RankedIn League Data: {google_sheets_url}' if google_sheets_url else ''}
+    {f'Additional New Players: {unmatched_players_sheet_url}' if unmatched_players_sheet_url else ''}
+
+    Attachment: Complete RankedIn dataset is available in the attached Excel file.
+
+    --
     Sushil Bhandari
-    Python Developer | Web Scraping & Automation Specialist
-    Phone: +977-9849892938
-    Upwork: https://www.upwork.com/freelancers/sushilbhandari
-    LinkedIn: https://www.linkedin.com/in/sushil-bhandari/
-    GitHub: https://github.com/yourusername
-    Website: https://sushil-bhandari.com.np
+    Python Developer & Automation Specialist
+    +977-9849892938
+    https://www.upwork.com/freelancers/~017c0d983bfe5ba79f
+    https://sushil-bhandari.com.np
     """
 
     return await send_email_with_attachment(
@@ -318,369 +607,4 @@ async def send_batch_tennis_report_email(
         bcc_emails=bcc_emails,
         is_html=True
     )
-
-
-async def scrape_and_email_batch_tennis_data(
-    league_pool_combinations: List[Tuple[str, str]],
-    recipients: List[str],
-    cc_emails: Optional[List[str]] = None,
-    bcc_emails: Optional[List[str]] = None,
-    client_email: Optional[str] = None,
-    include_google_sheets: bool = True,
-    delay: float = None,
-    batches: int = None,
-):
-
-    try:
-        logger.info(f"Starting batch scrape and email workflow for {len(league_pool_combinations)} combinations")
-
-        # Step 1: Scrape all the data for multiple combinations (ONLY ONCE)
-        logger.info("Step 1: Starting batch data scraping...")
-        batch_data = await collect_multiple_league_data(league_pool_combinations, delay, batches)
-
-        if not batch_data or not batch_data.get('successful_combinations'):
-            logger.error("No data was successfully scraped from any combination")
-            return False
-
-        logger.info("Batch data scraping completed successfully!")
-
-        # Step 2: Save to Excel
-        logger.info("Step 2: Saving batch data to Excel...")
-        excel_filename = await save_batch_to_excel(batch_data)
-
-        if not excel_filename or not os.path.exists(excel_filename):
-            logger.error("Failed to create Excel file")
-            return False
-
-        logger.info(f"Excel file created successfully: {excel_filename}")
-
-        # Step 3: Save to Google Sheets
-        google_sheets_url = None
-        if include_google_sheets:
-            logger.info("Step 3: Saving batch data to Google Sheets...")
-            try:
-                google_sheets_url = await save_batch_to_google_sheets(batch_data, client_email)
-                if google_sheets_url:
-                    logger.info(f"Google Sheets created successfully: {google_sheets_url}")
-                    if client_email:
-                        logger.info(f"Google Sheets shared with: {client_email}")
-                else:
-                    logger.warning("Failed to create Google Sheets document")
-            except Exception as gs_error:
-                logger.warning(f"Google Sheets creation failed: {str(gs_error)}")
-                logger.info("Continuing with Excel file only...")
-
-        # Step 4: Configure SMTP settings
-        smtp_config = {
-            'server': 'smtp.gmail.com',
-            'port': 587,
-            'username': EMAIL_USER,
-            'password': EMAIL_PASS,
-            'from_email': EMAIL_USER,
-        }
-
-        # Validate email configuration
-        if not EMAIL_USER or not EMAIL_PASS:
-            logger.error("Email credentials not found in environment variables")
-            return False
-
-        # Step 5: Send the email with attachment and Google Sheets link
-        logger.info("Step 4: Sending email with batch data...")
-        email_success = await send_batch_tennis_report_email(
-            smtp_config=smtp_config,
-            to_emails=recipients,
-            excel_file_path=excel_filename,
-            batch_summary=batch_data,
-            cc_emails=cc_emails,
-            bcc_emails=bcc_emails,
-            google_sheets_url=google_sheets_url
-        )
-
-        if email_success:
-            logger.info("Batch email sent successfully!")
-            logger.info(f"Report sent to: {', '.join(recipients)}")
-            if cc_emails:
-                logger.info(f"CC: {', '.join(cc_emails)}")
-            if bcc_emails:
-                logger.info(f"BCC: {', '.join(bcc_emails)}")
-            if google_sheets_url:
-                logger.info(f"Google Sheets URL included in email: {google_sheets_url}")
-
-            # Log summary
-            logger.info(f"Total combinations processed: {batch_data.get('total_processed', 0)}")
-            logger.info(f"Successful: {len(batch_data.get('successful_combinations', []))}")
-            logger.info(f"Failed: {len(batch_data.get('failed_combinations', []))}")
-
-        else:
-            logger.error("Batch email sending failed!")
-
-        return email_success
-
-    except Exception as e:
-        logger.error(f"Error in batch scrape and email workflow: {str(e)}")
-        logger.error(f"Error type: {type(e).__name__}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return False
-
-
-# Updated email sending function to include Google Sheets URL
-async def send_batch_tennis_report_email(
-    smtp_config: dict,
-    to_emails: List[str],
-    excel_file_path: str,
-    batch_summary: dict,
-    cc_emails: Optional[List[str]] = None,
-    bcc_emails: Optional[List[str]] = None,
-    google_sheets_url: Optional[str] = None  # New parameter
-):
-
-    try:
-        # Create message
-        msg = MIMEMultipart()
-        msg['From'] = smtp_config['from_email']
-        msg['To'] = ', '.join(to_emails)
-
-        if cc_emails:
-            msg['Cc'] = ', '.join(cc_emails)
-
-        # Get report details for subject
-        timestamp = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%Y-%m-%d_%H:%M:%S")
-        subject = f"🎾 RankedIn League Data Report - {timestamp}"
-        msg['Subject'] = subject
-
-        # HTML email body with professional styling - as a STRING, not list
-        html_body = f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset="UTF-8">
-            <style>
-                body {{
-                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 600px;
-                    margin: 0 auto;
-                    padding: 20px;
-                    background-color: #f8f9fa;
-                }}
-                .container {{
-                    background-color: white;
-                    padding: 30px;
-                    border-radius: 10px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                }}
-                .header {{
-                    border-bottom: 3px solid #28a745;
-                    padding-bottom: 15px;
-                    margin-bottom: 25px;
-                }}
-                .header h2 {{
-                    color: #28a745;
-                    margin: 0;
-                    font-size: 24px;
-                }}
-                .summary-section {{
-                    background-color: #f8f9fa;
-                    padding: 20px;
-                    border-radius: 8px;
-                    margin: 20px 0;
-                    border-left: 4px solid #007bff;
-                }}
-                .data-summary {{
-                    background-color: #e9ecef;
-                    padding: 15px;
-                    border-radius: 6px;
-                    margin: 20px 0;
-                    font-family: monospace;
-                    text-align: center;
-                }}
-                .signature {{
-                    margin-top: 30px;
-                    padding-top: 20px;
-                    border-top: 2px solid #e9ecef;
-                }}
-                .signature-content {{
-                    display: flex;
-                    align-items: flex-start;
-                    gap: 15px;
-                }}
-                .signature-text {{
-                    flex: 1;
-                }}
-                .signature-name {{
-                    font-weight: bold;
-                    font-size: 16px;
-                    color: #2c3e50;
-                    margin-bottom: 5px;
-                }}
-                .signature-title {{
-                    color: #7f8c8d;
-                    font-size: 14px;
-                    margin-bottom: 10px;
-                }}
-                .signature-contact {{
-                    font-size: 12px;
-                    line-height: 1.4;
-                }}
-                .signature-contact a {{
-                    color: #3498db;
-                    text-decoration: none;
-                }}
-                .signature-contact a:hover {{
-                    text-decoration: underline;
-                }}
-                .highlight {{
-                    background-color: #fff3cd;
-                    padding: 2px 6px;
-                    border-radius: 4px;
-                    font-weight: 500;
-                }}
-                .google-sheets {{
-                    background-color: #d1ecf1;
-                    padding: 15px;
-                    border-radius: 6px;
-                    margin: 20px 0;
-                    border-left: 4px solid #0dcaf0;
-                }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <div class="header">
-                    <h2>🎾 RankedIn League Data Report</h2>
-                    <p style="margin: 5px 0; color: #6c757d;">Comprehensive Tennis League Analytics</p>
-                </div>
-
-                <p>Hi {CLIENT_NAME},</p>
-
-                <p>Here’s your daily automated report with the latest league statistics.</p>
-
-                <div class="summary-section">
-                    <h3 style="margin-top: 0; color: #495057;">📊 Report Summary</h3>
-                    <p><strong>Generated:</strong> {datetime.now(ZoneInfo('Europe/Copenhagen')).strftime('%A, %B %d, %Y at %I:%M %p')}</p>
-                    <p><strong>File:</strong> <span class="highlight">{os.path.basename(excel_file_path)}</span></p>
-                    <p><strong>Total League/Pool Combinations:</strong> {batch_summary.get('total_processed', 0)}</p>
-                </div>
-
-                <h3 style="color: #495057;">📈 Data Summary</h3>
-                <div class="data-summary">
-                    <strong>Standings:</strong> {len(batch_summary.get('standings', []))} |
-                    <strong>Rounds:</strong> {len(batch_summary.get('rounds', []))} |
-                    <strong>Players:</strong> {len(batch_summary.get('players', []))} |
-                    <strong>Matches:</strong> {len(batch_summary.get('matches', []))} |
-                    <strong>Organizations:</strong> {len(batch_summary.get('organizations', []))}
-                </div>
-
-                {f'''
-                <div class="google-sheets">
-                    <h4 style="margin-top: 0; color: #0a58ca;">🔗 Live Google Sheets Access</h4>
-                    <p><strong>Link:</strong> <a href="{google_sheets_url}" target="_blank" style="color: #0a58ca;">{google_sheets_url}</a></p>
-                    <p style="margin-bottom: 0;"><strong>💡 Note:</strong> The Google Sheets version is live, but it cannot be accessed by everyone. Only people who have been given access can view, edit, and collaborate on the data in real-time.</p>
-                </div>
-                ''' if google_sheets_url else ''}
-
-                <div class="signature">
-                    <div class="signature-content">
-                        <div class="signature-text">
-                            <div class="signature-name">Sushil Bhandari</div>
-                            <div class="signature-title">Python Developer | Web Scraping & Automation Specialist</div>
-                            <div class="signature-contact">
-                                📱 <a href="tel:+977-9849892938">+977-9849892938</a><br>
-                                🔗 <a href="https://www.upwork.com/freelancers/~017c0d983bfe5ba79f" target="_blank">Upwork</a> |
-                                <a href="https://www.linkedin.com/in/sushil-b-46594420a//" target="_blank">LinkedIn</a> |
-                                <a href="https://github.com/sushil-rgb" target="_blank">GitHub</a> |
-                                <a href="https://sushil-bhandari.com.np" target="_blank">Website</a>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </body>
-        </html>
-        """
-
-        text_lines = [
-            f"RankedIn League Data Report - {timestamp}",
-            "",
-            f"Hi {CLIENT_NAME},",
-            "",
-            "Here’s your daily automated report with the latest league statistics.",
-            "",
-            "Report Details:",
-            f"• Generated: {datetime.now(ZoneInfo('Europe/Copenhagen')).strftime('%Y-%m-%d %H:%M:%S')}",
-            f"• File: {os.path.basename(excel_file_path)}",
-            f"• Total League/Pool Combinations: {batch_summary.get('total_processed', 0)}",
-            "",
-            f"Data Summary: Standings: {len(batch_summary.get('standings', []))} | Rounds: {len(batch_summary.get('rounds', []))} | Players: {len(batch_summary.get('players', []))} | Matches: {len(batch_summary.get('matches', []))} | Organizations: {len(batch_summary.get('organizations', []))}",
-            ""
-        ]
-
-        if google_sheets_url:
-            text_lines.extend([
-                "🔗 Live Google Sheets Access:",
-                f"• Link: {google_sheets_url}",
-                "",
-                "💡 Note: The Google Sheets version is live, but it cannot be accessed by everyone. Only people who have been given access can view, edit, and collaborate on the data in real-time.",
-                ""
-            ])
-
-        text_lines.extend([
-            f"Report generated on: {datetime.now(ZoneInfo('Europe/Copenhagen')).strftime('%Y-%m-%d at %H:%M:%S')}",
-            "",
-            "Best regards,",
-            "",
-            "Sushil Bhandari",
-            "Python Developer | Web Scraping & Automation Specialist",
-            "Phone: +977-9849892938",
-            "Upwork: https://www.upwork.com/freelancers/~017c0d983bfe5ba79f",
-            "LinkedIn: https://www.linkedin.com/in/sushil-b-46594420a//",
-            "GitHub: https://github.com/sushil-rgb",
-            "Website: https://sushil-bhandari.com.np"
-        ])
-
-        text_body = '\n'.join(text_lines)
-
-        msg.attach(MIMEText(html_body, 'html'))
-
-        if os.path.exists(excel_file_path):
-            with open(excel_file_path, "rb") as attachment:
-                part = MIMEBase('application', 'vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-                part.set_payload(attachment.read())
-
-            encoders.encode_base64(part)
-            filename = os.path.basename(excel_file_path)
-
-            part.add_header(
-                'Content-Disposition',
-                'attachment',
-                filename=filename
-            )
-            msg.attach(part)
-        else:
-            logger.error(f"Excel file not found: {excel_file_path}")
-            return False
-
-        # Connect to server and send email
-        server = smtplib.SMTP(smtp_config['server'], smtp_config['port'])
-        server.starttls()
-        server.login(smtp_config['username'], smtp_config['password'])
-
-        all_recipients = to_emails[:]
-        if cc_emails:
-            all_recipients.extend(cc_emails)
-        if bcc_emails:
-            all_recipients.extend(bcc_emails)
-
-        text = msg.as_string()
-        server.sendmail(smtp_config['from_email'], all_recipients, text)
-        server.quit()
-
-        logger.info("Email sent successfully!")
-        return True
-
-    except Exception as e:
-        logger.error(f"Error sending email: {str(e)}")
-        return False
 
