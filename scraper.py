@@ -836,7 +836,6 @@ async def collect_multiple_league_data(team_pool_combinations, delay, batches):
     }
 
 
-
 async def collect_multiple_league_data_archive(team_pool_combinations):
     all_standings = []
     all_rounds = []
