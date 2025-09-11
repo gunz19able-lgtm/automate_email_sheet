@@ -2,11 +2,11 @@ from openpyxl.utils import get_column_letter
 from fake_useragent import UserAgent
 from logger import setup_logger
 from primp import AsyncClient
+from datetime import datetime
 import pandas as pd
 import itertools
 import asyncio
 import random
-from datetime import datetime
 import pytz
 import os
 
@@ -54,13 +54,21 @@ async def random_interval(interval):
 
 
 async def make_requests(url, headers):
-    async with AsyncClient(impersonate = 'chrome_131', impersonate_os = 'windows') as client:
-        response = await client.get(url, headers = headers)
+    for _ in range(5):
+        try:
+            async with AsyncClient(impersonate='chrome_131', impersonate_os='windows') as client:
+                response = await client.get(url, headers=headers)
 
-        if response.status_code != 200:
-            return f"Red alert: Status code = {response.status_code}!"
+                if response.status_code != 200:
+                    return f"Red alert: Status code = {response.status_code}!"
 
-        return response
+                return response
+        except Exception as e:
+            logger.info(f"Error occurred: {str(e)}\nRetrying...")
+            await asyncio.sleep(2)
+            continue
+
+    return "Failed after 3 attempts"
 
 
 async def auto_adjust_column_width(worksheet, dataframe):
@@ -111,5 +119,4 @@ async def save_to_excel(standings_dataframe, rounds_dataframe, players_dataframe
 
     # IMPORTANT: Return the file path
     return file_path
-
 
