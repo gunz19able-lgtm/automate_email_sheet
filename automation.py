@@ -1,5 +1,5 @@
 from scraper import collect_multiple_league_data, save_batch_to_excel
-from google_sheet_automation import save_batch_to_google_sheets, load_players_stats_csv, compare_player_urls, save_addition_new_players_to_google_sheets
+from google_sheet_automation import save_batch_to_google_sheets, compare_player_urls, save_players_to_google_sheets
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from typing import List, Optional, Tuple
@@ -133,9 +133,9 @@ async def scrape_and_email_batch_tennis_data_with_player_comparison(
     delay: float = None,
     batches: int = None,
 ):
-    """Enhanced function that includes player URL comparison in the main workflow"""
+    """Enhanced function that saves all players data to Google Sheets"""
     try:
-        logger.info(f"Starting enhanced batch scrape and email workflow for {len(league_pool_combinations)} combinations")
+        logger.info(f"Starting batch scrape and email workflow for {len(league_pool_combinations)} combinations")
 
         # Step 1: Scrape all the data for multiple combinations
         logger.info("Step 1: Starting batch data scraping...")
@@ -147,39 +147,30 @@ async def scrape_and_email_batch_tennis_data_with_player_comparison(
 
         logger.info("Batch data scraping completed successfully!")
 
-        # Step 2: Load reference player URLs from Google Sheets
-        logger.info("Step 2: Loading reference player URLs...")
-        reference_urls = await load_players_stats_csv()
-
-        if not reference_urls:
-            logger.warning("No reference URLs loaded from Google Sheets")
-
-        # Step 3: Compare player URLs
-        logger.info("Step 3: Comparing player URLs...")
-        comparison_result = await compare_player_urls(batch_data.get('players', []), reference_urls)
-
-        # Step 4: Save unmatched data to Google Sheets (if there are unmatched URLs)
-        # FIX: Disable notification for additional players sheet to avoid duplicate emails
-        unmatched_players_sheet_url = None
+        # Step 2: Save players data to Google Sheets (additional players sheets)
+        players_sheet_url = None
         if include_google_sheets:
-            if comparison_result.get('unmatched_in_scraped_count', 0) > 0:
-                logger.info("Step 4: Saving latest additional players to Google Sheets...")
-                # Pass notify=False or modify the function to not send notifications
+            if batch_data.get('players'):
+                logger.info("Step 2: Saving players data to Google Sheets...")
                 try:
-                    unmatched_players_sheet_url = await save_addition_new_players_to_google_sheets(
-                        comparison_result,
-                        None,
+                    # Create comparison result structure with players data
+                    players_result = {
+                        'players_data': batch_data.get('players', [])
+                    }
 
+                    players_sheet_url = await save_players_to_google_sheets(
+                        players_result,
+                        None,
                     )
-                    if unmatched_players_sheet_url:
-                        logger.info('Google sheets for Additional Players created successfully')
+                    if players_sheet_url:
+                        logger.info('Google sheets for Players data created successfully')
                     else:
-                        logger.warning("Failed to create Additional Player Google Sheets document")
+                        logger.warning("Failed to create Players Google Sheets document")
                 except Exception as gs_error:
                     logger.warning(f"Google Sheets creation failed: {str(gs_error)}")
 
-        # Step 5: Save main batch data to Excel
-        logger.info("Step 5: Saving batch data to Excel...")
+        # Step 3: Save main batch data to Excel
+        logger.info("Step 3: Saving batch data to Excel...")
         excel_filename = await save_batch_to_excel(batch_data)
 
         if not excel_filename or not os.path.exists(excel_filename):
@@ -188,11 +179,10 @@ async def scrape_and_email_batch_tennis_data_with_player_comparison(
 
         logger.info(f"Excel file created successfully: {excel_filename}")
 
-        # Step 6: Save main batch data to Google Sheets
-        # FIX: Only notify for main sheet, not additional players sheet
+        # Step 4: Save main batch data to Google Sheets
         google_sheets_url = None
         if include_google_sheets:
-            logger.info("Step 6: Saving batch data to Google Sheets...")
+            logger.info("Step 4: Saving batch data to Google Sheets...")
             try:
                 google_sheets_url = await save_batch_to_google_sheets(
                     batch_data,
@@ -205,7 +195,7 @@ async def scrape_and_email_batch_tennis_data_with_player_comparison(
             except Exception as gs_error:
                 logger.warning(f"Google Sheets creation failed: {str(gs_error)}")
 
-        # Step 7: Configure SMTP settings
+        # Step 5: Configure SMTP settings
         smtp_config = {
             'server': 'smtp.gmail.com',
             'port': 587,
@@ -218,27 +208,32 @@ async def scrape_and_email_batch_tennis_data_with_player_comparison(
             logger.error("Email credentials not found in environment variables")
             return False
 
-        # Step 8: Send enhanced email with player comparison data
-        # ADD: Extra logging to debug attachment issues
-        logger.info("Step 8: Sending enhanced email with batch data and player comparison...")
+        # Step 6: Send email with batch data and total players stats
+        logger.info("Step 6: Sending email with batch data...")
         logger.info(f"About to send email with attachment: {excel_filename}")
         logger.info(f"File exists: {os.path.exists(excel_filename)}")
         logger.info(f"File size: {os.path.getsize(excel_filename) if os.path.exists(excel_filename) else 'N/A'} bytes")
+
+        # Create simplified stats for email
+        total_players = len(batch_data.get('players', []))
+        players_stats = {
+            'total_players': total_players
+        }
 
         email_success = await send_batch_tennis_report_email_with_player_analysis(
             smtp_config=smtp_config,
             to_emails=recipients,
             excel_file_path=excel_filename,
             batch_summary=batch_data,
-            comparison_result=comparison_result,
+            comparison_result=players_stats,
             cc_emails=cc_emails,
             bcc_emails=bcc_emails,
             google_sheets_url=google_sheets_url,
-            unmatched_players_sheet_url=unmatched_players_sheet_url
+            unmatched_players_sheet_url=players_sheet_url
         )
 
         if email_success:
-            logger.info("Enhanced batch email sent successfully!")
+            logger.info("Batch email sent successfully!")
             logger.info(f"Report sent to: {', '.join(recipients)}")
             if cc_emails:
                 logger.info(f"CC: {', '.join(cc_emails)}")
@@ -249,14 +244,14 @@ async def scrape_and_email_batch_tennis_data_with_player_comparison(
             logger.info(f"Total combinations processed: {batch_data.get('total_processed', 0)}")
             logger.info(f"Successful: {len(batch_data.get('successful_combinations', []))}")
             logger.info(f"Failed: {len(batch_data.get('failed_combinations', []))}")
-            logger.info(f"Player URL comparison - Matched: {comparison_result.get('matched_count', 0)}, Unmatched: {comparison_result.get('unmatched_in_scraped_count', 0)}")
+            logger.info(f"Total players processed: {total_players}")
         else:
-            logger.error("Enhanced batch email sending failed!")
+            logger.error("Batch email sending failed!")
 
         return email_success
 
     except Exception as e:
-        logger.error(f"Error in enhanced batch scrape and email workflow: {str(e)}")
+        logger.error(f"Error in batch scrape and email workflow: {str(e)}")
         logger.error(f"Error type: {type(e).__name__}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
@@ -274,13 +269,13 @@ async def send_batch_tennis_report_email_with_player_analysis(
     google_sheets_url: Optional[str] = None,
     unmatched_players_sheet_url: Optional[str] = None
 ) -> bool:
-    """Alternative email template with cleaner design"""
+    """Email template with total players statistics"""
 
     # Email subject
     timestamp = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%Y-%m-%d_%H:%M:%S")
-    subject = f"Tennis League Analytics Report - {timestamp}"
+    subject = f"🎾 RankedIn League Data Report - {timestamp}"
 
-    # Alternative HTML email body with minimal, professional design
+    # HTML email body with total players stats
     html_body = f"""
     <!DOCTYPE html>
     <html>
@@ -470,7 +465,7 @@ async def send_batch_tennis_report_email_with_player_analysis(
         <div class="email-container">
             <div class="header-strip">
                 <h1>🎾 RankedIn League Data Report</h1>
-                <p>Automated Data Analysis & Player Statistics</p>
+                <p>Daily Automated RankedIn Stats</p>
             </div>
 
             <div class="content-body">
@@ -478,20 +473,20 @@ async def send_batch_tennis_report_email_with_player_analysis(
                     Hi {CLIENT_NAME},
                 </div>
 
-                <p>Here's your daily automated report containing two comprehensive analyses; the main RankedIn league data and the Latest Additional Players.</p>
+                <p>Here's your daily automated report containing comprehensive RankedIn league data and player statistics.</p>
 
                 <div class="report-section">
                     <div class="report-title">League Data Summary</div>
                     <div class="info-row">
-                        <span class="info-label">Report Generated</span>
+                        <span class="info-label">Report Generated: </span>
                         <span class="info-value">{datetime.now(ZoneInfo('Europe/Copenhagen')).strftime('%B %d, %Y at %I:%M %p')}</span>
                     </div>
                     <div class="info-row">
-                        <span class="info-label">Excel File</span>
+                        <span class="info-label">Excel File: </span>
                         <span class="info-value">{os.path.basename(excel_file_path)}</span>
                     </div>
                     <div class="info-row">
-                        <span class="info-label">League Combinations</span>
+                        <span class="info-label">League Combinations: </span>
                         <span class="info-value">{batch_summary.get('total_processed', 0)}</span>
                     </div>
                 </div>
@@ -518,10 +513,10 @@ async def send_batch_tennis_report_email_with_player_analysis(
                 </div>
 
                 <div class="additional-stats">
-                    <div class="report-title">Additional Players</div>
+                    <div class="report-title">Total Players</div>
                     <div style="text-align: center; padding: 10px;">
-                        <span style="font-size: 24px; font-weight: 700; color: #17a2b8;">{comparison_result.get('unmatched_in_scraped_count', 0)}</span>
-                        <div style="font-size: 12px; color: #6c757d; margin-top: 5px;">New Players Identified</div>
+                        <span style="font-size: 24px; font-weight: 700; color: #17a2b8;">{comparison_result.get('total_players', 0)}</span>
+                        <div style="font-size: 12px; color: #6c757d; margin-top: 5px;">Players Processed</div>
                     </div>
                 </div>
 
@@ -529,7 +524,7 @@ async def send_batch_tennis_report_email_with_player_analysis(
                 <div class="links-section">
                     <h4>Access Your Data</h4>
                     {f'<div class="link-item">📊 <a href="{google_sheets_url}" target="_blank">RankedIn League Data Spreadsheet</a></div>' if google_sheets_url else ''}
-                    {f'<div class="link-item">👥 <a href="{unmatched_players_sheet_url}" target="_blank">New Additional Players Datasheet</a></div>' if unmatched_players_sheet_url else ''}
+                    {f'<div class="link-item">👥 <a href="{unmatched_players_sheet_url}" target="_blank">Players Data Spreadsheet</a></div>' if unmatched_players_sheet_url else ''}
                 </div>
                 ''' if google_sheets_url or unmatched_players_sheet_url else ''}
 
@@ -562,7 +557,7 @@ async def send_batch_tennis_report_email_with_player_analysis(
 
     Hi {CLIENT_NAME},
 
-    Here's your daily automated report containing two comprehensive analyses; the main RankedIn league data and the Latest Additional Players.
+    Here's your daily automated report containing comprehensive RankedIn league data and player statistics.
 
     LEAGUE DATA SUMMARY
     Report Generated: {datetime.now(ZoneInfo('Europe/Copenhagen')).strftime('%B %d, %Y at %I:%M %p')}
@@ -575,12 +570,12 @@ async def send_batch_tennis_report_email_with_player_analysis(
     Matches: {len(batch_summary.get('matches', []))}
     Organizations: {len(batch_summary.get('organizations', []))}
 
-    ADDITIONAL PLAYER ANALYSIS
-    New Players Identified: {comparison_result.get('unmatched_in_scraped_count', 0)}
+    PLAYER STATISTICS
+    Total Players Processed: {comparison_result.get('total_players', 0)}
 
     ACCESS YOUR DATA
     {f'RankedIn League Data: {google_sheets_url}' if google_sheets_url else ''}
-    {f'Additional New Players: {unmatched_players_sheet_url}' if unmatched_players_sheet_url else ''}
+    {f'Players Data Spreadsheet: {unmatched_players_sheet_url}' if unmatched_players_sheet_url else ''}
 
     Attachment: Complete RankedIn dataset is available in the attached Excel file.
 
