@@ -57,6 +57,7 @@ async def get_ranking_position_of_players(player_id):
     }
 
     api_url = f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={player_id}"
+    target_ranking_name = "Dansk Padel Forbunds rangliste (Men-Main/MD)"
 
     try:
         response = await make_requests(api_url, headers=headers)
@@ -64,35 +65,47 @@ async def get_ranking_position_of_players(player_id):
 
         latest_timestamp = 0
         latest_standing = None
+        latest_ranking_name = None
 
-        # Iterate through all rankings to find the latest timestamp
+        # Iterate through each ranking list
         for idx in range(len(ranking_position)):
-            ranking_lists = ranking_position[idx]
-            for jdx in range(len(ranking_lists)):
-                unix_timestamp = ranking_lists[jdx]['UnixTimestamp']
-                standing = ranking_lists[jdx]['Standing']
-                ranking_name = ranking_lists[idx]['RankingName']
+            ranking_list = ranking_position[idx]
 
-                # Keep track of the latest timestamp and its standing
-                if unix_timestamp > latest_timestamp:
-                    latest_timestamp = unix_timestamp
-                    latest_standing = standing
-                    latest_ranking_name = ranking_name
+            if isinstance(ranking_list, list):
+                # Process all entries in this ranking list
+                for entry in ranking_list:
+                    if isinstance(entry, dict) and 'UnixTimestamp' in entry and 'Standing' in entry:
+                        unix_timestamp = entry['UnixTimestamp']
+                        standing = entry['Standing']
 
-        # Convert and display the latest timestamp
+                        # Check for ranking name in the entry
+                        entry_ranking_name = entry.get('RankingName', f"Ranking_{idx}")
+
+                        # Only process if it's the target ranking name or contains the target name
+                        if (entry_ranking_name == target_ranking_name or
+                            target_ranking_name in str(entry_ranking_name)):
+
+                            # Keep track of the highest timestamp (latest/furthest date, could be in future)
+                            if unix_timestamp > latest_timestamp:
+                                latest_timestamp = unix_timestamp
+                                latest_standing = standing
+                                latest_ranking_name = entry_ranking_name
+
+        # Convert and display the latest (highest/furthest) timestamp
         if latest_timestamp > 0:
             latest_date = await convert_unix_timestamp(latest_timestamp)
-            print(f"Latest timestamp: {latest_date}")
-            print(f"Standing for latest timestamp: {latest_standing}")
+            logger.info(f"Ranking Name: {latest_ranking_name}")
+            logger.info(f"Latest timestamp: {latest_date}")
+            logger.info(f"Standing for latest timestamp: {latest_standing}")
 
-            # Return both standing and timestamp as a tuple
-            return latest_standing, latest_date, ranking_name
+            # Return standing, timestamp, and ranking name as a tuple
+            return latest_standing, latest_date, latest_ranking_name
         else:
-            print("No valid timestamps found")
+            logger.info(f"No valid timestamps found for ranking: {target_ranking_name}")
             return None, None, None
 
     except Exception as e:
-        print(f"Error: {str(e)}")
+        logger.info(f"Error: {str(e)}")
         return None, None, None
 
 
