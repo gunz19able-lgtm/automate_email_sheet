@@ -22,7 +22,7 @@ PLAYER_SPREADSHEET_ID = os.getenv('PLAYER_SPREADSHEET_ID')
 ADDITIONAL_PLAYER_SPREADSHEET_ID = os.getenv('ADDITIONAL_PLAYER_SPREADSHEET_ID')
 
 
-async def load_players_stats_csv():
+'''async def load_players_stats_csv():
     try:
         scope = [
             'https://spreadsheets.google.com/feeds',
@@ -42,7 +42,7 @@ async def load_players_stats_csv():
         return players_urls
 
     except Exception as e:
-        logger.info(f"Error loading configuration from Google Sheets: {str(e)}")
+        logger.info(f"Error loading configuration from Google Sheets: {str(e)}")'''
 
 
 async def compare_player_urls(scraped_players_data, reference_urls):
@@ -91,7 +91,7 @@ async def compare_player_urls(scraped_players_data, reference_urls):
         return {}
 
 
-async def save_addition_new_players_to_google_sheets(comparison_result: Dict, client_email: str = None):
+async def save_players_to_google_sheets(players_result: Dict, client_email: str = None):
     try:
         scope = [
             'https://spreadsheets.google.com/feeds',
@@ -105,7 +105,7 @@ async def save_addition_new_players_to_google_sheets(comparison_result: Dict, cl
         spreadsheet = client.open_by_key(ADDITIONAL_PLAYER_SPREADSHEET_ID)
 
         timestamp = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%Y-%m-%d_%H:%M:%S")
-        spreadsheet_name = f"Latest_Additional_Players_Statistics_{timestamp}"
+        spreadsheet_name = f"Latest_Players_Stats_{timestamp}"
         spreadsheet.update_title(spreadsheet_name)
 
         def format_dataframe_for_sheets(df):
@@ -136,7 +136,7 @@ async def save_addition_new_players_to_google_sheets(comparison_result: Dict, cl
             return result
 
         def format_worksheet(worksheet, data):
-            """Format worksheet with headers, freeze, and auto-adjust columns"""
+            """Format worksheet with headers, freeze, and auto-adjust columns and rows"""
             if not data:
                 return
 
@@ -157,14 +157,81 @@ async def save_addition_new_players_to_google_sheets(comparison_result: Dict, cl
             # Auto-resize columns
             worksheet.columns_auto_resize(0, len(data[0]) - 1)
 
-        # Save Unmatched Players to Sheet1
-        if comparison_result.get('unmatched_players_data'):
-            unmatched_players_df = pd.DataFrame(comparison_result['unmatched_players_data'])
+            # Auto-resize rows (adjust height based on content)
+            worksheet.rows_auto_resize(0, len(data) - 1)
 
-            unmatched_sheet = spreadsheet.sheet1
-            unmatched_data = format_dataframe_for_sheets(unmatched_players_df)
-            format_worksheet(unmatched_sheet, unmatched_data)
+        def create_or_get_worksheet(spreadsheet, sheet_name):
+            """Create a new worksheet or get existing one"""
+            try:
+                return spreadsheet.worksheet(sheet_name)
+            except gspread.WorksheetNotFound:
+                return spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=26)
+
+        # Process players data directly from comparison_result
+        if players_result.get('players'):
+            players_df = pd.DataFrame(players_result['players'])
+
+            # 1st sheet: players_table (don't touch - keeping existing data)
+            # This sheet already exists and we're not modifying it
+
+            # 2nd sheet: team_league (only specific columns with renamed headers)
+            team_league_columns = ['Player ID', 'RankedInId', 'season_id', 'pool_id', 'Player Order', 'Team Participant Type', 'Has License', 'Team Club Id']
+            team_league_df = players_df[team_league_columns].copy()
+
+            # Rename columns for team_league sheet
+            team_league_rename_map = {
+                'Player ID': 'player_id',
+                'RankedInId': 'rankedIn_id',
+                'Player Order': 'player_order',
+                'Team Participant Type': 'player_type',
+                'Has License': 'has_license',
+                'Team Club Id': 'team_club_id'
+                # season_id and pool_id keep their names
+            }
+            team_league_df.rename(columns=team_league_rename_map, inplace=True)
+
+            team_league_sheet = create_or_get_worksheet(spreadsheet, 'team_league')
+            team_league_data = format_dataframe_for_sheets(team_league_df)
+            format_worksheet(team_league_sheet, team_league_data)
             await asyncio.sleep(1)
+
+            # 3rd sheet: ranking_name (only players with ranking name values)
+            # Filter players that have non-empty ranking name, position, or timestamp
+            ranking_mask = (
+                (players_df['Ranking Name'].notna()) &
+                (players_df['Ranking Name'] != '') |
+                (players_df['Ranking Position'].notna()) &
+                (players_df['Ranking Position'] != '') |
+                (players_df['Ranking Timestamp'].notna()) &
+                (players_df['Ranking Timestamp'] != '')
+            )
+
+            ranking_df = players_df[ranking_mask].copy()
+
+            if not ranking_df.empty:
+                # Select only the required columns for ranking sheet
+                ranking_columns = ['Player ID', 'RankedInId', 'Ranking Position', 'Ranking Name', 'Ranking Timestamp']
+                ranking_df = ranking_df[ranking_columns]
+
+                # Rename columns for ranking sheet
+                ranking_rename_map = {
+                    'Player ID': 'player_id',
+                    'RankedInId': 'rankedIn_id',
+                    'Ranking Position': 'ranking_position',
+                    'Ranking Name': 'ranking_name',
+                    'Ranking Timestamp': 'ranking_timestamp'
+                }
+                ranking_df.rename(columns=ranking_rename_map, inplace=True)
+
+                ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_name')
+                ranking_data = format_dataframe_for_sheets(ranking_df)
+                format_worksheet(ranking_sheet, ranking_data)
+                await asyncio.sleep(1)
+            else:
+                # Create empty sheet if no ranking data
+                ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_name')
+                ranking_sheet.clear()
+                ranking_sheet.update('A1', ['No players with ranking data found'])
 
         # Share spreadsheet if email provided
         if client_email:
@@ -180,11 +247,21 @@ async def save_addition_new_players_to_google_sheets(comparison_result: Dict, cl
                 logger.info(f"Could not share with {client_email}: {str(e)}")
 
         spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{ADDITIONAL_PLAYER_SPREADSHEET_ID}"
-        logger.info(f"Latest Additional Players Google Sheets created with {len(comparison_result.get('unmatched_players_data', []))} unmatched players: {spreadsheet_url}")
+        logger.info(f"Latest Players Google Sheets created with:")
+        logger.info(f"  - Team League sheet: {len(players_result.get('players', []))} players")
+        if players_result.get('players'):
+            players_df = pd.DataFrame(players_result['players'])
+            ranking_count = len(players_df[
+                (players_df['Ranking Name'].notna()) & (players_df['Ranking Name'] != '') |
+                (players_df['Ranking Position'].notna()) & (players_df['Ranking Position'] != '') |
+                (players_df['Ranking Timestamp'].notna()) & (players_df['Ranking Timestamp'] != '')
+            ])
+            logger.info(f"  - Ranking Name sheet: {ranking_count} players with ranking data")
+        logger.info(f"  URL: {spreadsheet_url}")
         return spreadsheet_url
 
     except Exception as e:
-        logger.info(f"Error saving additional players data to Google Sheets: {str(e)}")
+        logger.error(f"Error saving players data to Google Sheets: {str(e)}")
         return None
 
 
