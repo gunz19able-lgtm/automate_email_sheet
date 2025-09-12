@@ -54,21 +54,27 @@ async def random_interval(interval):
 
 
 async def make_requests(url, headers):
-    for _ in range(5):
+    for attempt in range(5):
         try:
-            async with AsyncClient(impersonate='chrome_131', impersonate_os='windows') as client:
+            async with AsyncClient(
+                impersonate='chrome_131',
+                impersonate_os='windows',
+                timeout=60.0
+            ) as client:
                 response = await client.get(url, headers=headers)
 
                 if response.status_code != 200:
                     return f"Red alert: Status code = {response.status_code}!"
 
                 return response
+
         except Exception as e:
-            logger.info(f"Error occurred: {str(e)}\nRetrying...")
-            await asyncio.sleep(2)
+            logger.info(f"Attempt {attempt + 1} failed: {str(e)}")
+            if attempt < 4:  # Don't sleep after the last attempt
+                await asyncio.sleep(2)
             continue
 
-    return "Failed after 3 attempts"
+    return "Failed after 5 attempts"
 
 
 async def auto_adjust_column_width(worksheet, dataframe):
