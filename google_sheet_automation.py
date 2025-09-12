@@ -171,24 +171,58 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
         if players_result.get('players'):
             players_df = pd.DataFrame(players_result['players'])
 
-            # 1st sheet: players_table (don't touch - keeping existing data)
-            # This sheet already exists and we're not modifying it
+            # 1st sheet: players_table (with team_id and rankedIn_id included)
+            players_table_columns = ['Player ID', 'RankedInId', 'Team_ID_Players', 'Player URL']  # Added RankedInId
+
+            # Filter to only existing columns
+            existing_players_table_columns = [col for col in players_table_columns if col in players_df.columns]
+
+            if existing_players_table_columns:
+                players_table_df = players_df[existing_players_table_columns].copy()
+
+                # Remove duplicates to ensure unique player-team-rankedIn combinations
+                players_table_df = players_table_df.drop_duplicates()
+
+                # Rename columns for players_table sheet
+                players_table_rename_map = {
+                    'Player ID': 'player_id',
+                    'RankedInId': 'rankedIn_id',
+                    'Team_ID_Players': 'team_id',
+                    'Player URL': 'player_url',
+                }
+
+                # Only rename columns that exist
+                filtered_rename_map = {k: v for k, v in players_table_rename_map.items() if k in players_table_df.columns}
+                players_table_df.rename(columns=filtered_rename_map, inplace=True)
+
+                players_table_sheet = create_or_get_worksheet(spreadsheet, 'players_table')
+                players_table_data = format_dataframe_for_sheets(players_table_df)
+                format_worksheet(players_table_sheet, players_table_data)
+                await asyncio.sleep(1)
 
             # 2nd sheet: team_league (only specific columns with renamed headers)
-            team_league_columns = ['Player ID', 'RankedInId', 'season_id', 'pool_id', 'Player Order', 'Team Participant Type', 'Has License', 'Team Club Id']
-            team_league_df = players_df[team_league_columns].copy()
+            team_league_columns = ['Player ID', 'RankedInId', 'season_id', 'pool_id', 'Team_ID_Players', 'Player Order', 'Team Participant Type', 'Has License', 'Team Organisation Id', 'Player URL']
+
+            # Filter to only existing columns
+            existing_team_league_columns = [col for col in team_league_columns if col in players_df.columns]
+            team_league_df = players_df[existing_team_league_columns].copy()
 
             # Rename columns for team_league sheet
             team_league_rename_map = {
                 'Player ID': 'player_id',
                 'RankedInId': 'rankedIn_id',
+                'Team_ID_Players': 'team_id',
                 'Player Order': 'player_order',
                 'Team Participant Type': 'player_type',
                 'Has License': 'has_license',
-                'Team Club Id': 'team_club_id'
+                'Team Organisation Id': 'team_organisation_id',
+                'Player URL': 'player_url',
                 # season_id and pool_id keep their names
             }
-            team_league_df.rename(columns=team_league_rename_map, inplace=True)
+
+            # Only rename columns that exist
+            filtered_team_league_rename_map = {k: v for k, v in team_league_rename_map.items() if k in team_league_df.columns}
+            team_league_df.rename(columns=filtered_team_league_rename_map, inplace=True)
 
             team_league_sheet = create_or_get_worksheet(spreadsheet, 'team_league')
             team_league_data = format_dataframe_for_sheets(team_league_df)
@@ -210,28 +244,42 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
 
             if not ranking_df.empty:
                 # Select only the required columns for ranking sheet
-                ranking_columns = ['Player ID', 'RankedInId', 'Ranking Position', 'Ranking Name', 'Ranking Timestamp']
-                ranking_df = ranking_df[ranking_columns]
+                ranking_columns = ['Player ID', 'Team_ID_Players', 'RankedInId', 'Ranking Position', 'Ranking Name', 'Ranking Timestamp', 'Player URL']
+
+                # Filter to only existing columns
+                existing_ranking_columns = [col for col in ranking_columns if col in ranking_df.columns]
+                ranking_df = ranking_df[existing_ranking_columns]
+
+                # Remove duplicate players (keep first occurrence based on Player ID)
+                ranking_df = ranking_df.drop_duplicates()
 
                 # Rename columns for ranking sheet
                 ranking_rename_map = {
                     'Player ID': 'player_id',
+                    'Team_ID_Players': 'team_id',
                     'RankedInId': 'rankedIn_id',
                     'Ranking Position': 'ranking_position',
                     'Ranking Name': 'ranking_name',
-                    'Ranking Timestamp': 'ranking_timestamp'
+                    'Ranking Timestamp': 'ranking_timestamp',
+                    'Player URL': 'player_url',
                 }
-                ranking_df.rename(columns=ranking_rename_map, inplace=True)
 
-                ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_name')
+                # Only rename columns that exist
+                filtered_ranking_rename_map = {k: v for k, v in ranking_rename_map.items() if k in ranking_df.columns}
+                ranking_df.rename(columns=filtered_ranking_rename_map, inplace=True)
+
+                ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
                 ranking_data = format_dataframe_for_sheets(ranking_df)
                 format_worksheet(ranking_sheet, ranking_data)
                 await asyncio.sleep(1)
+
+                ranking_count = len(ranking_df)
             else:
                 # Create empty sheet if no ranking data
-                ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_name')
+                ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
                 ranking_sheet.clear()
                 ranking_sheet.update('A1', ['No players with ranking data found'])
+                ranking_count = 0
 
         # Share spreadsheet if email provided
         if client_email:
@@ -248,15 +296,9 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
 
         spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{ADDITIONAL_PLAYER_SPREADSHEET_ID}"
         logger.info(f"Latest Players Google Sheets created with:")
+        logger.info(f"  - Players Table sheet: {len(existing_players_table_columns)} columns")
         logger.info(f"  - Team League sheet: {len(players_result.get('players', []))} players")
-        if players_result.get('players'):
-            players_df = pd.DataFrame(players_result['players'])
-            ranking_count = len(players_df[
-                (players_df['Ranking Name'].notna()) & (players_df['Ranking Name'] != '') |
-                (players_df['Ranking Position'].notna()) & (players_df['Ranking Position'] != '') |
-                (players_df['Ranking Timestamp'].notna()) & (players_df['Ranking Timestamp'] != '')
-            ])
-            logger.info(f"  - Ranking Name sheet: {ranking_count} players with ranking data")
+        logger.info(f"  - Ranking Name sheet: {ranking_count} players with ranking data")
         logger.info(f"  URL: {spreadsheet_url}")
         return spreadsheet_url
 
