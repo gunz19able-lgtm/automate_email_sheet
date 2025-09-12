@@ -42,6 +42,34 @@ async def division_name_call(league_id):
     return division_name
 
 
+"""async def get_players_url_image(rankedin_id):
+    headers = {
+    'User-Agent': await random_useragent(),
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.5',
+    # 'Accept-Encoding': 'gzip, deflate, br, zstd',
+    'Referer': 'https://rankedin.com/',
+    'Origin': 'https://rankedin.com',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
+    'Connection': 'keep-alive',
+    'Cookie': '__stripe_mid=d46b5b70-2201-4083-a2b9-cab70e0b697564e55a; ARRAffinity=4334255d9508d90d91675813fd4970201a6736e602b033e6fc00b5a23410f015; ARRAffinitySameSite=4334255d9508d90d91675813fd4970201a6736e602b033e6fc00b5a23410f015; __stripe_sid=21857c77-dc76-473b-8e42-691fba8f012cac3dff',
+    }
+
+    api_url = f"https://api.rankedin.com/v1/metadata/GetFeatureMetadataAsync?feature=PlayerProfile&id=0&rankedinId={rankedin_id}&language=en"
+
+    try:
+        response = await make_requests(api_url, headers = headers)
+        raw_datas = response.json()
+        image_url = raw_datas['featureImage']
+        return image_url
+    except Exception as e:
+        logger.error(f"Error getting players for team {rankedin_id}: {str(e)}")
+        return []
+"""
+
+
 async def get_ranking_position_of_players(player_id):
     headers = {
         'User-Agent': await random_useragent(),
@@ -110,8 +138,11 @@ async def get_ranking_position_of_players(player_id):
 
 
 async def get_players(season_id):
+    """
+    Enhanced get_players function that includes player image URLs
+    """
     headers = {
-        f'User-Agent': await random_useragent(),
+        'User-Agent': await random_useragent(),
         'Accept': 'application/json, text/plain, */*',
         'Accept-Language': 'en-US,en;q=0.5',
         'Referer': 'https://rankedin.com/en/team/homepage/1764246',
@@ -130,19 +161,34 @@ async def get_players(season_id):
         players_lists = raw_datas['Team']['Players']
         players_listings_dicts = []
 
-        # Extract player IDs for ranking position lookup
+        # Extract player IDs and RankedInIds for concurrent operations
         player_ids = [player_data['Id'] for player_data in players_lists]
+        rankedin_ids = [player_data['RankedinId'] for player_data in players_lists]
 
-        # Get ranking positions, timestamps, and ranking names concurrently
+        # Get ranking positions, timestamps, ranking names, and image URLs concurrently
         ranking_map = {}
         timestamp_map = {}
         ranking_name_map = {}
-        if player_ids:
-            logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {season_id}...")
-            ranking_tasks = [get_ranking_position_of_players(player_id) for player_id in player_ids]
-            ranking_results = await asyncio.gather(*ranking_tasks, return_exceptions=True)
+        image_url_map = {}
 
-            # Create mappings of player_id to ranking position, timestamp, and ranking name
+        if player_ids:
+            logger.info(f"Collecting data for {len(player_ids)} players in season {season_id}...")
+
+            # Create tasks for ranking positions
+            ranking_tasks = [get_ranking_position_of_players(player_id) for player_id in player_ids]
+
+            # Create tasks for player images
+            image_tasks = [get_players(rankedin_id) for rankedin_id in rankedin_ids]
+
+            # Run both sets of tasks concurrently
+            logger.info("Fetching ranking positions and player images concurrently...")
+            ranking_results, image_results = await asyncio.gather(
+                asyncio.gather(*ranking_tasks, return_exceptions=True),
+                asyncio.gather(*image_tasks, return_exceptions=True),
+                return_exceptions=True
+            )
+
+            # Process ranking results
             for i, result in enumerate(ranking_results):
                 if isinstance(result, Exception):
                     logger.error(f"Error getting ranking for player {player_ids[i]}: {result}")
@@ -156,10 +202,19 @@ async def get_players(season_id):
                     timestamp_map[player_ids[i]] = timestamp if timestamp is not None else ""
                     ranking_name_map[player_ids[i]] = ranking_name if ranking_name is not None else ""
 
-        # Build player data with ranking positions, timestamps, and ranking names
+            # Process image URL results
+            for i, result in enumerate(image_results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error getting image for RankedInId {rankedin_ids[i]}: {result}")
+                    image_url_map[rankedin_ids[i]] = ""
+                else:
+                    image_url_map[rankedin_ids[i]] = result if result is not None else ""
+
+        # Build player data with ranking positions, timestamps, ranking names, and image URLs
         for idx in range(len(players_lists)):
             player_datas = players_lists[idx]
             player_id = player_datas['Id']
+            rankedin_id = player_datas['RankedinId']
 
             datas = {
                 'Team_ID_Players': season_id,
@@ -170,15 +225,16 @@ async def get_players(season_id):
                 'Player ID': player_id,
                 'Ranking Position': ranking_map.get(player_id, ""),
                 'Ranking Timestamp': timestamp_map.get(player_id, ""),
-                'Ranking Name': ranking_name_map.get(player_id, ""),  # Add ranking name field
-                'RankedInId': player_datas['RankedinId'],
+                'Ranking Name': ranking_name_map.get(player_id, ""),
+                'RankedInId': rankedin_id,
+                'Player Image URL': image_url_map.get(rankedin_id, ""),  # Add image URL field
                 'Name': player_datas['FirstName'],
                 'Player Order': player_datas['PlayerOrder'],
                 'Player Rating': player_datas['RatingBegin'],
                 'Team Participant Type': player_datas['TeamParticipantType'],
                 'Has License': player_datas['HasLicense'],
                 'Player URL': f"https://rankedin.com{player_datas['PlayerUrl']}",
-                'Team Club Id': team_club_id,
+                'Team Organisation Id': team_club_id,
                 'Players Home Club Id': player_datas['HomeClub']['Id'],
                 'Home Club Name': player_datas['HomeClub']['Name'],
                 'Home Club Country': player_datas['HomeClub']['CountryShort'],
@@ -569,10 +625,10 @@ async def get_standings_rounds_data(league_id, pool_id):
         for jdx in range(len(standing_tables)):
             standing_results = standing_tables[jdx]
             standing_datas = {
-                'Season League ID': league_id,
-                'Pool ID': pool_id,
+                # 'Season League ID': league_id,
+                # 'Pool ID': pool_id,
                 'Participant ID': standing_results['ParticipantId'],
-                'Season_ID_Standings': standing_results['ParticipantUrl'].split('/')[-1],
+                'team_id_standing': standing_results['ParticipantUrl'].split('/')[-1],
                 'Standing': standing_results['Standing'],
                 'Name': standing_results['ParticipantName'],
                 'Match Points': standing_results['MatchPoints'],
@@ -605,8 +661,8 @@ async def get_standings_rounds_data(league_id, pool_id):
                 match_ids.append(matches[gdx]['MatchId'])
 
                 round_matches_datas = {
-                    'Season League ID': league_id,
-                    'Pool ID': pool_id,
+                    # 'Season League ID': league_id,
+                    # 'Pool ID': pool_id,
                     'Match ID': matches[gdx]['MatchId'],
                     'Date': target_datas['RoundDate'],
                     'Round': target_datas['RoundNumber'],
@@ -638,6 +694,128 @@ async def get_standings_rounds_data(league_id, pool_id):
     except Exception as e:
         logger.error(f"Error occurred. Are you sure it's the right division and pool ID?\nError: {str(e)}")
         return None
+
+
+async def get_player_image_url(rankedin_id):
+    """
+    Get player image URL using RankedInId
+    """
+    headers = {
+        'User-Agent': await random_useragent(),
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://rankedin.com/',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'Connection': 'keep-alive',
+    }
+
+    # Construct player profile URL using RankedInId
+    url = f"https://rankedin.com/api/player/{rankedin_id}/profile"
+
+    try:
+        response = await make_requests(url, headers=headers)
+        if response.status_code == 200:
+            player_data = response.json()
+            # Extract image URL from player data
+            image_url = player_data.get('ProfileImageUrl', '')
+            if image_url and not image_url.startswith('http'):
+                # Make sure URL is absolute
+                image_url = f"https://rankedin.com{image_url}"
+            return image_url
+        else:
+            logger.warning(f"Failed to get player image for RankedInId {rankedin_id}: HTTP {response.status_code}")
+            return ""
+    except Exception as e:
+        logger.error(f"Error getting player image for RankedInId {rankedin_id}: {str(e)}")
+        return ""
+
+
+async def get_players(season_id):
+    headers = {
+        f'User-Agent': await random_useragent(),
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Referer': 'https://rankedin.com/en/team/homepage/1764246',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'Connection': 'keep-alive',
+        'Cookie': 'ai_user=DFzEjMtcUnEUDoZhTMKlbQ^|2025-08-11T18:49:59.686Z; __stripe_mid=6d617d98-f9ca-4fb0-b4f7-dfc799d68f5a760a87; modal-ads={%22_playerId%22:null%2C%22_ads%22:[{%22_id%22:9%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:10%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:4%2C%22_lastAdDate%22:%222025-08-11%22}]}; ARRAffinity=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; ARRAffinitySameSite=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; language=en',
+    }
+    url = f"https://rankedin.com/team/tlhomepage/{season_id}"
+
+    try:
+        response = await make_requests(url, headers=headers)
+        raw_datas = response.json()
+        team_club_id = raw_datas['Team']['HomeClub']['Id']
+        players_lists = raw_datas['Team']['Players']
+        players_listings_dicts = []
+
+        # Extract player IDs for ranking position lookup
+        player_ids = [player_data['Id'] for player_data in players_lists]
+
+        # Get ranking positions, timestamps, and ranking names concurrently
+        ranking_map = {}
+        timestamp_map = {}
+        ranking_name_map = {}
+        if player_ids:
+            logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {season_id}...")
+            ranking_tasks = [get_ranking_position_of_players(player_id) for player_id in player_ids]
+            ranking_results = await asyncio.gather(*ranking_tasks, return_exceptions=True)
+
+            # Create mappings of player_id to ranking position, timestamp, and ranking name
+            for i, result in enumerate(ranking_results):
+                if isinstance(result, Exception):
+                    logger.error(f"Error getting ranking for player {player_ids[i]}: {result}")
+                    ranking_map[player_ids[i]] = ""
+                    timestamp_map[player_ids[i]] = ""
+                    ranking_name_map[player_ids[i]] = ""
+                else:
+                    # Unpack the tuple returned from get_ranking_position_of_players
+                    standing, timestamp, ranking_name = result
+                    ranking_map[player_ids[i]] = standing if standing is not None else ""
+                    timestamp_map[player_ids[i]] = timestamp if timestamp is not None else ""
+                    ranking_name_map[player_ids[i]] = ranking_name if ranking_name is not None else ""
+
+        # Build player data with ranking positions, timestamps, and ranking names
+        for idx in range(len(players_lists)):
+            player_datas = players_lists[idx]
+            player_id = player_datas['Id']
+
+            datas = {
+                'Team_ID_Players': season_id,
+                'Pool ID': raw_datas['PoolId'],
+                'Team League ID': raw_datas['TeamLeagueId'],
+                'Team League Name': raw_datas['TeamLeagueName'],
+                'State Message': raw_datas['StateMessage'],
+                'Player ID': player_id,
+                'Ranking Position': ranking_map.get(player_id, ""),
+                'Ranking Timestamp': timestamp_map.get(player_id, ""),
+                'Ranking Name': ranking_name_map.get(player_id, ""),  # Add ranking name field
+                'RankedInId': player_datas['RankedinId'],
+                'Name': player_datas['FirstName'],
+                'Player Order': player_datas['PlayerOrder'],
+                'Player Rating': player_datas['RatingBegin'],
+                'Team Participant Type': player_datas['TeamParticipantType'],
+                'Has License': player_datas['HasLicense'],
+                'Player URL': f"https://rankedin.com{player_datas['PlayerUrl']}",
+                'Team Organisation Id': team_club_id,
+                'Players Home Club Id': player_datas['HomeClub']['Id'],
+                'Home Club Name': player_datas['HomeClub']['Name'],
+                'Home Club Country': player_datas['HomeClub']['CountryShort'],
+                'Home Club City': player_datas['HomeClub']['City'],
+                'Home Club URL': f"https://rankedin.com{player_datas['HomeClub']['Url']}",
+                'Ranking API URL': f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={player_id}",
+            }
+
+            players_listings_dicts.append(datas)
+
+        return players_listings_dicts
+    except Exception as e:
+        logger.error(f"Error getting players for team {season_id}: {str(e)}")
+        return []
 
 
 async def collect_data_concurrently(season_id_home, season_id_away, match_ids):
@@ -672,7 +850,7 @@ async def collect_data_concurrently(season_id_home, season_id_away, match_ids):
             # Collect unique organization IDs from players
             season_id = unique_season_ids[i]
             for player in result:
-                org_id = player.get('Team Club Id')
+                org_id = player.get('Team Organisation Id')
                 if org_id:
                     org_season_pairs.append((season_id, org_id))
 
