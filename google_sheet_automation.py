@@ -175,10 +175,11 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
             # logger.info(f"Available columns in players_df: {list(players_df.columns)}")
 
             # 1st sheet: players_table - Only specific columns + team_id
-            # Define the columns you want for players_table
+            # Define the columns you want for players_table (reordered to put team_id beside player_id)
             required_columns_map = {
                 'name': ['name', 'Name', 'player_name', 'Player Name'],
                 'player_id': ['Player ID', 'player_id'],
+                'team_id': ['Team_ID_Players', 'team_id', 'Team_ID'],  # Added here for column order
                 'rankedin_id': ['RankedInId', 'rankedIn_id', 'rankedin_id'],
                 'home_club_id': ['home_club_id', 'Home Club ID', 'Home_Club_ID'],
                 'player_url': ['Player URL', 'player_url']
@@ -195,29 +196,33 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
             # Create players_table dataframe with only the required columns
             players_table_data = {}
             for target_col, actual_col in actual_columns.items():
-                if actual_col in players_df.columns:
+                if actual_col in players_df.columns and target_col != 'team_id':  # Handle team_id separately
                     players_table_data[target_col] = players_df[actual_col]
 
-            # Add team_id by finding Team_ID_Players for each rankedin_id
+            # Handle team_id mapping
             if players_table_data and 'rankedin_id' in players_table_data:
                 # Find the Team_ID_Players column
-                team_id_source_col = None
-                for possible_name in ['Team_ID_Players', 'team_id', 'Team_ID']:
-                    if possible_name in players_df.columns:
-                        team_id_source_col = possible_name
-                        break
+                team_id_source_col = actual_columns.get('team_id')
 
-                if team_id_source_col:
+                if team_id_source_col and team_id_source_col in players_df.columns:
                     # Create a mapping of rankedin_id to team_id
                     rankedin_to_team = players_df.groupby(actual_columns['rankedin_id'])[team_id_source_col].first().to_dict()
 
-                    # Map team_id to each row based on rankedin_id
-                    players_table_data['team_id'] = [rankedin_to_team.get(rid) for rid in players_table_data['rankedin_id']]
+                    # Map team_id to each row based on rankedin_id, keeping empty string for missing values
+                    players_table_data['team_id'] = [rankedin_to_team.get(rid, '') for rid in players_table_data['rankedin_id']]
                 else:
-                    players_table_data['team_id'] = [None] * len(players_table_data['rankedin_id'])
+                    # If no team_id column found, create empty team_id column
+                    players_table_data['team_id'] = [''] * len(players_table_data['rankedin_id'])
 
-            if players_table_data:
-                players_table_df = pd.DataFrame(players_table_data)
+            # Reorder columns to put team_id beside player_id
+            column_order = ['name', 'player_id', 'team_id', 'rankedin_id', 'home_club_id', 'player_url']
+            ordered_players_table_data = {}
+            for col in column_order:
+                if col in players_table_data:
+                    ordered_players_table_data[col] = players_table_data[col]
+
+            if ordered_players_table_data:
+                players_table_df = pd.DataFrame(ordered_players_table_data)
                 # Remove duplicates based on rankedin_id (keep first occurrence)
                 if 'rankedin_id' in players_table_df.columns:
                     players_table_df = players_table_df.drop_duplicates(subset=['rankedin_id'])
@@ -225,7 +230,7 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
                     players_table_df = players_table_df.drop_duplicates()
             else:
                 # Create empty dataframe with required columns if no data found
-                players_table_df = pd.DataFrame(columns=['name', 'player_id', 'rankedin_id', 'home_club_id', 'player_url', 'team_id'])
+                players_table_df = pd.DataFrame(columns=['name', 'player_id', 'team_id', 'rankedin_id', 'home_club_id', 'player_url'])
 
             players_table_sheet = create_or_get_worksheet(spreadsheet, 'players_table')
             players_table_data = format_dataframe_for_sheets(players_table_df)
@@ -312,12 +317,7 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
 
                     if ranking_df_data:
                         ranking_df = pd.DataFrame(ranking_df_data)
-
-                        # Remove duplicates based on available columns
-                        if 'rankedIn_id' in ranking_df.columns:
-                            ranking_df = ranking_df.drop_duplicates(subset=['rankedIn_id'])
-                        else:
-                            ranking_df = ranking_df.drop_duplicates()
+                        ranking_df = ranking_df.drop_duplicates(subset=['rankedIn_id'])
 
                         ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
                         ranking_data = format_dataframe_for_sheets(ranking_df)
