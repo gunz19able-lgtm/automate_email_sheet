@@ -171,115 +171,179 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
         if players_result.get('players'):
             players_df = pd.DataFrame(players_result['players'])
 
-            # 1st sheet: players_table (with team_id and rankedIn_id included)
-            players_table_columns = ['Player ID', 'RankedInId', 'Team_ID_Players', 'Player URL']  # Added RankedInId
+            # Debug: Print available columns to understand the structure
+            # logger.info(f"Available columns in players_df: {list(players_df.columns)}")
 
-            # Filter to only existing columns
-            existing_players_table_columns = [col for col in players_table_columns if col in players_df.columns]
-
-            if existing_players_table_columns:
-                players_table_df = players_df[existing_players_table_columns].copy()
-
-                # Remove duplicates to ensure unique player-team-rankedIn combinations
-                players_table_df = players_table_df.drop_duplicates()
-
-                # Rename columns for players_table sheet
-                players_table_rename_map = {
-                    'Player ID': 'player_id',
-                    'RankedInId': 'rankedIn_id',
-                    'Team_ID_Players': 'team_id',
-                    'Player URL': 'player_url',
-                }
-
-                # Only rename columns that exist
-                filtered_rename_map = {k: v for k, v in players_table_rename_map.items() if k in players_table_df.columns}
-                players_table_df.rename(columns=filtered_rename_map, inplace=True)
-
-                players_table_sheet = create_or_get_worksheet(spreadsheet, 'players_table')
-                players_table_data = format_dataframe_for_sheets(players_table_df)
-                format_worksheet(players_table_sheet, players_table_data)
-                await asyncio.sleep(1)
-
-            # 2nd sheet: team_league (only specific columns with renamed headers)
-            team_league_columns = ['Player ID', 'RankedInId', 'season_id', 'pool_id', 'Team_ID_Players', 'Player Order', 'Team Participant Type', 'Has License', 'Team Organisation Id', 'Player URL']
-
-            # Filter to only existing columns
-            existing_team_league_columns = [col for col in team_league_columns if col in players_df.columns]
-            team_league_df = players_df[existing_team_league_columns].copy()
-
-            # Rename columns for team_league sheet
-            team_league_rename_map = {
-                'Player ID': 'player_id',
-                'RankedInId': 'rankedIn_id',
-                'Team_ID_Players': 'team_id',
-                'Player Order': 'player_order',
-                'Team Participant Type': 'player_type',
-                'Has License': 'has_license',
-                'Team Organisation Id': 'team_organisation_id',
-                'Player URL': 'player_url',
-                # season_id and pool_id keep their names
+            # 1st sheet: players_table - Only specific columns + team_id
+            # Define the columns you want for players_table
+            required_columns_map = {
+                'name': ['name', 'Name', 'player_name', 'Player Name'],
+                'player_id': ['Player ID', 'player_id'],
+                'rankedin_id': ['RankedInId', 'rankedIn_id', 'rankedin_id'],
+                'home_club_id': ['home_club_id', 'Home Club ID', 'Home_Club_ID'],
+                'player_url': ['Player URL', 'player_url']
             }
 
-            # Only rename columns that exist
-            filtered_team_league_rename_map = {k: v for k, v in team_league_rename_map.items() if k in team_league_df.columns}
-            team_league_df.rename(columns=filtered_team_league_rename_map, inplace=True)
+            # Find actual column names in the dataframe
+            actual_columns = {}
+            for target_col, possible_names in required_columns_map.items():
+                for possible_name in possible_names:
+                    if possible_name in players_df.columns:
+                        actual_columns[target_col] = possible_name
+                        break
 
-            team_league_sheet = create_or_get_worksheet(spreadsheet, 'team_league')
-            team_league_data = format_dataframe_for_sheets(team_league_df)
-            format_worksheet(team_league_sheet, team_league_data)
+            # Create players_table dataframe with only the required columns
+            players_table_data = {}
+            for target_col, actual_col in actual_columns.items():
+                if actual_col in players_df.columns:
+                    players_table_data[target_col] = players_df[actual_col]
+
+            # Add team_id by finding Team_ID_Players for each rankedin_id
+            if players_table_data and 'rankedin_id' in players_table_data:
+                # Find the Team_ID_Players column
+                team_id_source_col = None
+                for possible_name in ['Team_ID_Players', 'team_id', 'Team_ID']:
+                    if possible_name in players_df.columns:
+                        team_id_source_col = possible_name
+                        break
+
+                if team_id_source_col:
+                    # Create a mapping of rankedin_id to team_id
+                    rankedin_to_team = players_df.groupby(actual_columns['rankedin_id'])[team_id_source_col].first().to_dict()
+
+                    # Map team_id to each row based on rankedin_id
+                    players_table_data['team_id'] = [rankedin_to_team.get(rid) for rid in players_table_data['rankedin_id']]
+                else:
+                    players_table_data['team_id'] = [None] * len(players_table_data['rankedin_id'])
+
+            if players_table_data:
+                players_table_df = pd.DataFrame(players_table_data)
+                # Remove duplicates based on rankedin_id (keep first occurrence)
+                if 'rankedin_id' in players_table_df.columns:
+                    players_table_df = players_table_df.drop_duplicates(subset=['rankedin_id'])
+                else:
+                    players_table_df = players_table_df.drop_duplicates()
+            else:
+                # Create empty dataframe with required columns if no data found
+                players_table_df = pd.DataFrame(columns=['name', 'player_id', 'rankedin_id', 'home_club_id', 'player_url', 'team_id'])
+
+            players_table_sheet = create_or_get_worksheet(spreadsheet, 'players_table')
+            players_table_data = format_dataframe_for_sheets(players_table_df)
+            format_worksheet(players_table_sheet, players_table_data)
             await asyncio.sleep(1)
 
-            # 3rd sheet: ranking_name (only players with ranking name values)
-            # Filter players that have non-empty ranking name, position, or timestamp
-            ranking_mask = (
-                (players_df['Ranking Name'].notna()) &
-                (players_df['Ranking Name'] != '') |
-                (players_df['Ranking Position'].notna()) &
-                (players_df['Ranking Position'] != '') |
-                (players_df['Ranking Timestamp'].notna()) &
-                (players_df['Ranking Timestamp'] != '')
-            )
+            # 2nd sheet: team_league (only specific columns with renamed headers)
+            # Check which columns actually exist and use the correct case
+            possible_columns = {
+                'player_id': ['Player ID', 'player_id'],
+                'rankedIn_id': ['RankedInId', 'rankedIn_id', 'rankedin_id'],
+                'season_id': ['season_id', 'Season_ID'],
+                'pool_id': ['pool_id', 'Pool_ID'],
+                'team_id': ['Team_ID_Players', 'team_id', 'Team_ID'],
+                'player_order': ['Player Order', 'player_order'],
+                'player_type': ['Team Participant Type', 'player_type'],
+                'has_license': ['Has License', 'has_license'],
+                'team_organisation_id': ['Team Organisation Id', 'team_organisation_id'],
+                'player_url': ['Player URL', 'player_url']
+            }
 
-            ranking_df = players_df[ranking_mask].copy()
+            team_league_df_data = {}
+            actual_columns_used = []
 
-            if not ranking_df.empty:
-                # Select only the required columns for ranking sheet
-                ranking_columns = ['Player ID', 'Team_ID_Players', 'RankedInId', 'Ranking Position', 'Ranking Name', 'Ranking Timestamp', 'Player URL']
+            for target_col, possible_names in possible_columns.items():
+                for possible_name in possible_names:
+                    if possible_name in players_df.columns:
+                        team_league_df_data[target_col] = players_df[possible_name]
+                        actual_columns_used.append(possible_name)
+                        break
 
-                # Filter to only existing columns
-                existing_ranking_columns = [col for col in ranking_columns if col in ranking_df.columns]
-                ranking_df = ranking_df[existing_ranking_columns]
-
-                # Remove duplicate players (keep first occurrence based on Player ID)
-                ranking_df = ranking_df.drop_duplicates()
-
-                # Rename columns for ranking sheet
-                ranking_rename_map = {
-                    'Player ID': 'player_id',
-                    'Team_ID_Players': 'team_id',
-                    'RankedInId': 'rankedIn_id',
-                    'Ranking Position': 'ranking_position',
-                    'Ranking Name': 'ranking_name',
-                    'Ranking Timestamp': 'ranking_timestamp',
-                    'Player URL': 'player_url',
-                }
-
-                # Only rename columns that exist
-                filtered_ranking_rename_map = {k: v for k, v in ranking_rename_map.items() if k in ranking_df.columns}
-                ranking_df.rename(columns=filtered_ranking_rename_map, inplace=True)
-
-                ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
-                ranking_data = format_dataframe_for_sheets(ranking_df)
-                format_worksheet(ranking_sheet, ranking_data)
+            if team_league_df_data:
+                team_league_df = pd.DataFrame(team_league_df_data)
+                team_league_sheet = create_or_get_worksheet(spreadsheet, 'team_league')
+                team_league_data = format_dataframe_for_sheets(team_league_df)
+                format_worksheet(team_league_sheet, team_league_data)
                 await asyncio.sleep(1)
+                logger.info(f"Team League sheet created with columns: {list(team_league_df.columns)}")
 
-                ranking_count = len(ranking_df)
+            # 3rd sheet: ranking_name (only players with ranking name values)
+            # Check for ranking columns with different possible names
+            ranking_columns_map = {
+                'player_id': ['Player ID', 'player_id'],
+                'team_id': ['Team_ID_Players', 'team_id', 'Team_ID'],
+                'rankedIn_id': ['RankedInId', 'rankedIn_id', 'rankedin_id'],
+                'ranking_position': ['Ranking Position', 'ranking_position'],
+                'ranking_name': ['Ranking Name', 'ranking_name'],
+                'ranking_timestamp': ['Ranking Timestamp', 'ranking_timestamp'],
+                'player_url': ['Player URL', 'player_url']
+            }
+
+            # Find actual column names for ranking data
+            ranking_actual_columns = {}
+            for target_col, possible_names in ranking_columns_map.items():
+                for possible_name in possible_names:
+                    if possible_name in players_df.columns:
+                        ranking_actual_columns[target_col] = possible_name
+                        break
+
+            # Check if we have ranking data columns
+            ranking_name_col = ranking_actual_columns.get('ranking_name')
+            ranking_position_col = ranking_actual_columns.get('ranking_position')
+            ranking_timestamp_col = ranking_actual_columns.get('ranking_timestamp')
+
+            if ranking_name_col or ranking_position_col or ranking_timestamp_col:
+                # Create filter mask for rows with ranking data
+                ranking_mask = pd.Series([False] * len(players_df))
+
+                if ranking_name_col:
+                    ranking_mask |= (players_df[ranking_name_col].notna()) & (players_df[ranking_name_col] != '')
+                if ranking_position_col:
+                    ranking_mask |= (players_df[ranking_position_col].notna()) & (players_df[ranking_position_col] != '')
+                if ranking_timestamp_col:
+                    ranking_mask |= (players_df[ranking_timestamp_col].notna()) & (players_df[ranking_timestamp_col] != '')
+
+                ranking_df_source = players_df[ranking_mask].copy()
+
+                if not ranking_df_source.empty:
+                    # Create ranking dataframe with available columns
+                    ranking_df_data = {}
+                    for target_col, actual_col in ranking_actual_columns.items():
+                        if actual_col in ranking_df_source.columns:
+                            ranking_df_data[target_col] = ranking_df_source[actual_col]
+
+                    if ranking_df_data:
+                        ranking_df = pd.DataFrame(ranking_df_data)
+
+                        # Remove duplicates based on available columns
+                        if 'rankedIn_id' in ranking_df.columns:
+                            ranking_df = ranking_df.drop_duplicates(subset=['rankedIn_id'])
+                        else:
+                            ranking_df = ranking_df.drop_duplicates()
+
+                        ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
+                        ranking_data = format_dataframe_for_sheets(ranking_df)
+                        format_worksheet(ranking_sheet, ranking_data)
+                        await asyncio.sleep(1)
+
+                        ranking_count = len(ranking_df)
+                        logger.info(f"Ranking sheet created with {ranking_count} players")
+                    else:
+                        ranking_count = 0
+                        # Create empty sheet
+                        ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
+                        ranking_sheet.clear()
+                        ranking_sheet.update('A1', [['No ranking columns found']])
+                else:
+                    ranking_count = 0
+                    # Create empty sheet
+                    ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
+                    ranking_sheet.clear()
+                    ranking_sheet.update('A1', [['No players with ranking data found']])
             else:
-                # Create empty sheet if no ranking data
+                ranking_count = 0
+                # Create empty sheet
                 ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
                 ranking_sheet.clear()
-                ranking_sheet.update('A1', ['No players with ranking data found'])
-                ranking_count = 0
+                ranking_sheet.update('A1', [['No ranking columns available']])
 
         # Share spreadsheet if email provided
         if client_email:
@@ -296,7 +360,7 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
 
         spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{ADDITIONAL_PLAYER_SPREADSHEET_ID}"
         logger.info(f"Latest Players Google Sheets created with:")
-        logger.info(f"  - Players Table sheet: {len(existing_players_table_columns)} columns")
+        logger.info(f"  - Players Table sheet: {len(players_table_df.columns)} columns")
         logger.info(f"  - Team League sheet: {len(players_result.get('players', []))} players")
         logger.info(f"  - Ranking Name sheet: {ranking_count} players with ranking data")
         logger.info(f"  URL: {spreadsheet_url}")
@@ -304,6 +368,9 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
 
     except Exception as e:
         logger.error(f"Error saving players data to Google Sheets: {str(e)}")
+        logger.error(f"Error details: {type(e).__name__}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
 
