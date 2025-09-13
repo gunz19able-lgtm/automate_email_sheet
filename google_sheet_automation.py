@@ -171,114 +171,6 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
         if players_result.get('players'):
             players_df = pd.DataFrame(players_result['players'])
 
-            # # Debug: Print available columns to understand the structure
-            # logger.info(f"Total players before processing: {len(players_df)}")
-            # logger.info(f"Available columns in players_df: {list(players_df.columns)}")
-
-            # # 1st sheet: players_table - Only specific columns + team_id
-            # # Define the columns you want for players_table (reordered to put team_id beside player_id)
-            # required_columns_map = {
-            #     'name': ['name', 'Name', 'player_name', 'Player Name'],
-            #     'player_id': ['Player ID', 'player_id'],
-            #     'team_id': ['Team_ID_Players', 'team_id', 'Team_ID'],  # Added here for column order
-            #     'rankedin_id': ['RankedInId', 'rankedIn_id', 'rankedin_id'],
-            #     'home_club_id': ['home_club_id', 'Home Club ID', 'Home_Club_ID'],
-            #     'player_url': ['Player URL', 'player_url']
-            # }
-
-            # # Find actual column names in the dataframe
-            # actual_columns = {}
-            # for target_col, possible_names in required_columns_map.items():
-            #     for possible_name in possible_names:
-            #         if possible_name in players_df.columns:
-            #             actual_columns[target_col] = possible_name
-            #             break
-
-            # logger.info(f"Actual columns found: {actual_columns}")
-
-            # # Create players_table dataframe with only the required columns
-            # players_table_data = {}
-
-            # # First, add all columns except team_id
-            # for target_col, actual_col in actual_columns.items():
-            #     if actual_col in players_df.columns and target_col != 'team_id':
-            #         players_table_data[target_col] = players_df[actual_col].copy()
-
-            # # Handle team_id mapping separately and ensure all players are included
-            # if players_table_data and 'rankedin_id' in players_table_data:
-            #     # Find the Team_ID_Players column
-            #     team_id_source_col = actual_columns.get('team_id')
-
-            #     if team_id_source_col and team_id_source_col in players_df.columns:
-            #         logger.info(f"Using team_id column: {team_id_source_col}")
-
-            #         # Create a mapping of rankedin_id to team_id
-            #         # Use dropna=False to include all rankedin_id values, even those without team_id
-            #         rankedin_to_team = players_df.groupby(actual_columns['rankedin_id'], dropna=False)[team_id_source_col].first().to_dict()
-
-            #         logger.info(f"Team mapping created for {len(rankedin_to_team)} rankedin_ids")
-
-            #         # Map team_id to each row based on rankedin_id
-            #         # Keep empty string for players who don't have a corresponding team_id value
-            #         team_ids = []
-            #         for rid in players_table_data['rankedin_id']:
-            #             # Get the team_id for this rankedin_id, default to empty string if not found
-            #             team_id_value = rankedin_to_team.get(rid, '')
-
-            #             # Handle various types of missing/empty values
-            #             if pd.isna(team_id_value) or team_id_value is None or str(team_id_value).strip() == '' or str(team_id_value).lower() == 'nan':
-            #                 team_id_value = ''  # Keep row with empty team_id
-            #             else:
-            #                 team_id_value = str(team_id_value).strip()
-
-            #             team_ids.append(team_id_value)
-
-            #         players_table_data['team_id'] = team_ids
-
-            #         # Debug: Check how many players have team_id vs empty
-            #         non_empty_team_ids = sum(1 for tid in team_ids if tid != '')
-            #         empty_team_ids = len(team_ids) - non_empty_team_ids
-            #         logger.info(f"Players with team_id: {non_empty_team_ids}, without team_id (kept with empty value): {empty_team_ids}")
-            #     else:
-            #         logger.info("No team_id column found, creating empty team_id column")
-            #         # If no team_id column found, create empty team_id column for all players
-            #         players_table_data['team_id'] = [''] * len(players_table_data['rankedin_id'])
-
-            # # Reorder columns to put team_id beside player_id
-            # column_order = ['name', 'player_id', 'team_id', 'rankedin_id', 'home_club_id', 'player_url']
-            # ordered_players_table_data = {}
-            # for col in column_order:
-            #     if col in players_table_data:
-            #         ordered_players_table_data[col] = players_table_data[col]
-
-            # if ordered_players_table_data:
-            #     players_table_df = pd.DataFrame(ordered_players_table_data)
-            #     logger.info(f"Players table DataFrame created with {len(players_table_df)} rows")
-
-            #     # Remove duplicates based on rankedin_id (keep first occurrence)
-            #     # This preserves all unique players, including those without team_id
-            #     if 'rankedin_id' in players_table_df.columns:
-            #         initial_count = len(players_table_df)
-            #         players_table_df = players_table_df.drop_duplicates(subset=['rankedin_id'], keep='first')
-            #         final_count = len(players_table_df)
-            #         logger.info(f"After removing duplicates: {final_count} players (removed {initial_count - final_count} duplicates)")
-
-            #         # Debug: Check how many players have team_id after deduplication
-            #         players_with_team = players_table_df[players_table_df['team_id'] != '']
-            #         players_without_team = players_table_df[players_table_df['team_id'] == '']
-            #         logger.info(f"Final count - With team_id: {len(players_with_team)}, Without team_id: {len(players_without_team)}")
-            #     else:
-            #         players_table_df = players_table_df.drop_duplicates()
-            # else:
-            #     logger.warning("No valid column data found for players_table")
-            #     # Create empty dataframe with required columns if no data found
-            #     players_table_df = pd.DataFrame(columns=['name', 'player_id', 'team_id', 'rankedin_id', 'home_club_id', 'player_url'])
-
-            # players_table_sheet = create_or_get_worksheet(spreadsheet, 'players_table')
-            # players_table_data = format_dataframe_for_sheets(players_table_df)
-            # format_worksheet(players_table_sheet, players_table_data)
-            # await asyncio.sleep(1)
-
             # 2nd sheet: team_league (only specific columns with renamed headers)
             # Check which columns actually exist and use the correct case
             possible_columns = {
@@ -402,9 +294,7 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
 
         spreadsheet_url = f"https://docs.google.com/spreadsheets/d/{ADDITIONAL_PLAYER_SPREADSHEET_ID}"
         logger.info(f"Latest Players Google Sheets created with:")
-        # logger.info(f"  - Players Table sheet: {len(players_table_df)} players, {len(players_table_df.columns)} columns")
         logger.info(f"  - Team League sheet: {len(players_result.get('players', []))} players")
-        logger.info(f"  - Ranking Name sheet: {ranking_count} players with ranking data")
         logger.info(f"  URL: {spreadsheet_url}")
         return spreadsheet_url
 
