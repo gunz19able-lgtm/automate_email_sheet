@@ -838,7 +838,7 @@ async def collect_data_concurrently(season_id_home, season_id_away, match_ids):
 
     # Flatten players results and collect organization IDs
     all_players = []
-    org_season_pairs = []
+    org_season_pairs = []  # Keep ALL pairs, not just unique ones
 
     for i, result in enumerate(players_results):
         if isinstance(result, Exception):
@@ -847,15 +847,12 @@ async def collect_data_concurrently(season_id_home, season_id_away, match_ids):
 
         if result:
             all_players.extend(result)
-            # Collect unique organization IDs from players
+            # Collect ALL organization-season pairs (don't deduplicate yet)
             season_id = unique_season_ids[i]
             for player in result:
                 org_id = player.get('Team Organisation Id')
                 if org_id:
                     org_season_pairs.append((season_id, org_id))
-
-    # Remove duplicate organization requests
-    unique_org_pairs = list(set(org_season_pairs))
 
     # Collect matches data concurrently with proper home/away team IDs
     logger.info(f"Collecting matches data for {len(team_match_tuples)} matches concurrently...")
@@ -873,19 +870,11 @@ async def collect_data_concurrently(season_id_home, season_id_away, match_ids):
         if result:
             all_matches.extend(result)
 
-    # Remove duplicate organization IDs (keep only unique org_ids)
-    unique_org_ids = list(set([org_id for _, org_id in unique_org_pairs]))
+    # FIXED: Don't deduplicate org_season_pairs - we want one record per team-org combination
+    logger.info(f"Collecting organizations data for {len(org_season_pairs)} team-organization combinations concurrently...")
 
-    # Collect organizations data concurrently (using first season_id for each unique org_id)
-    logger.info(f"Collecting organizations data for {len(unique_org_ids)} unique organizations concurrently...")
-
-    # Create mapping of org_id to season_id for API calls
-    org_to_season = {}
-    for season_id, org_id in unique_org_pairs:
-        if org_id not in org_to_season:
-            org_to_season[org_id] = season_id
-
-    org_tasks = [get_organisation_id(str(org_to_season[org_id]), str(org_id)) for org_id in unique_org_ids]
+    # Create tasks for ALL team-organization combinations
+    org_tasks = [get_organisation_id(str(season_id), str(org_id)) for season_id, org_id in org_season_pairs]
     org_results = await asyncio.gather(*org_tasks, return_exceptions=True)
 
     # Flatten organization results
@@ -897,6 +886,22 @@ async def collect_data_concurrently(season_id_home, season_id_away, match_ids):
 
         if result:
             all_organizations.extend(result)
+
+    # Drop duplicates from organization data based on team_id_organisation and Organisation_Id
+    if all_organizations:
+        logger.info(f"Removing duplicates from {len(all_organizations)} organization records...")
+        seen_combinations = set()
+        deduplicated_orgs = []
+
+        for org in all_organizations:
+            # Create a unique key based on team_id and org_id
+            key = (org.get('team_id_organisation'), org.get('Organisation_Id'))
+            if key not in seen_combinations:
+                seen_combinations.add(key)
+                deduplicated_orgs.append(org)
+
+        logger.info(f"Kept {len(deduplicated_orgs)} unique organization records after deduplication")
+        all_organizations = deduplicated_orgs
 
     logger.info("Concurrent data collection completed!")
 
