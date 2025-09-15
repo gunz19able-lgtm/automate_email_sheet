@@ -59,22 +59,24 @@ async def make_requests(url, headers):
             async with AsyncClient(
                 impersonate='chrome_131',
                 impersonate_os='windows',
-                timeout=60.0
             ) as client:
                 response = await client.get(url, headers=headers)
 
-                if response.status_code != 200:
-                    return f"Red alert: Status code = {response.status_code}!"
-
-                return response
+                if response.status_code == 200:
+                    return response  # Only return on success
+                else:
+                    logger.info(f"Attempt {attempt + 1}: Status code {response.status_code}")
+                    if attempt < 4:  # Don't sleep after the last attempt
+                        await asyncio.sleep(2)
+                    continue  # Retry on non-200 status codes
 
         except Exception as e:
             logger.info(f"Attempt {attempt + 1} failed: {str(e)}")
-            if attempt < 4:  # Don't sleep after the last attempt
+            if attempt < 4:
                 await asyncio.sleep(2)
             continue
 
-    return "Failed after 5 attempts"
+    return "Failed after 5 attempts"  # Only return string after all attempts fail
 
 
 async def auto_adjust_column_width(worksheet, dataframe):
