@@ -134,7 +134,7 @@ async def main():
             return
 
         # Collect only matches data
-        batches = 25
+        batches = 5
         random_delay = await random_interval(3)
         matches_data = await collect_matches_data_only(team_id_home, team_id_away, match_ids,  batches, random_delay)
 
