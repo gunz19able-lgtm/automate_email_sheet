@@ -155,7 +155,7 @@ async def scrape_and_email_batch_tennis_data_with_player_comparison(
                 try:
                     # Create comparison result structure with players data
                     players_result = {
-                        'players_data': batch_data.get('players', [])
+                        'players': batch_data.get('players', [])
                     }
 
                     players_sheet_url = await save_players_to_google_sheets(
