@@ -50,7 +50,7 @@ async def random_useragent():
 
 
 async def random_interval(interval):
-    return random.uniform(1, interval + 1)
+    return random.uniform(3, interval + 1)
 
 
 async def make_requests(url, headers):
