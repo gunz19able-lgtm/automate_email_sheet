@@ -732,7 +732,15 @@ async def get_player_image_url(rankedin_id):
         return ""
 
 
-async def get_players(season_id):
+async def get_players(season_id, max_concurrent_rankings=3, delay_between_batches=5):
+    """
+    Get players data with limited concurrency for ranking position requests
+
+    Args:
+        season_id: The season ID to get players for
+        max_concurrent_rankings: Max concurrent ranking requests (default: 5)
+        delay_between_batches: Delay between ranking batches in seconds (default: 1)
+    """
     headers = {
         f'User-Agent': await random_useragent(),
         'Accept': 'application/json, text/plain, */*',
@@ -745,6 +753,7 @@ async def get_players(season_id):
         'Cookie': 'ai_user=DFzEjMtcUnEUDoZhTMKlbQ^|2025-08-11T18:49:59.686Z; __stripe_mid=6d617d98-f9ca-4fb0-b4f7-dfc799d68f5a760a87; modal-ads={%22_playerId%22:null%2C%22_ads%22:[{%22_id%22:9%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:10%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:4%2C%22_lastAdDate%22:%222025-08-11%22}]}; ARRAffinity=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; ARRAffinitySameSite=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; language=en',
     }
     url = f"https://rankedin.com/team/tlhomepage/{season_id}"
+    random_delay = await random_interval(delay_between_batches)
 
     try:
         response = await make_requests(url, headers=headers)
@@ -756,28 +765,42 @@ async def get_players(season_id):
         # Extract player IDs for ranking position lookup
         player_ids = [player_data['Id'] for player_data in players_lists]
 
-        # Get ranking positions, timestamps, and ranking names concurrently
+        # Get ranking positions with limited concurrency
         ranking_map = {}
         timestamp_map = {}
         ranking_name_map = {}
-        if player_ids:
-            logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {season_id}...")
-            ranking_tasks = [get_ranking_position_of_players(player_id) for player_id in player_ids]
-            ranking_results = await asyncio.gather(*ranking_tasks, return_exceptions=True)
 
-            # Create mappings of player_id to ranking position, timestamp, and ranking name
-            for i, result in enumerate(ranking_results):
-                if isinstance(result, Exception):
-                    logger.error(f"Error getting ranking for player {player_ids[i]}: {result}")
-                    ranking_map[player_ids[i]] = ""
-                    timestamp_map[player_ids[i]] = ""
-                    ranking_name_map[player_ids[i]] = ""
-                else:
-                    # Unpack the tuple returned from get_ranking_position_of_players
-                    standing, timestamp, ranking_name = result
-                    ranking_map[player_ids[i]] = standing if standing is not None else ""
-                    timestamp_map[player_ids[i]] = timestamp if timestamp is not None else ""
-                    ranking_name_map[player_ids[i]] = ranking_name if ranking_name is not None else ""
+        if player_ids:
+            logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {season_id} with max {max_concurrent_rankings} concurrent...")
+
+            # Process ranking requests in batches
+            for i in range(0, len(player_ids), max_concurrent_rankings):
+                batch_ids = player_ids[i:i + max_concurrent_rankings]
+                logger.info(f"Processing ranking batch {i//max_concurrent_rankings + 1} with {len(batch_ids)} players...")
+
+                # Create tasks for this batch
+                ranking_tasks = [get_ranking_position_of_players(player_id) for player_id in batch_ids]
+                ranking_results = await asyncio.gather(*ranking_tasks, return_exceptions=True)
+
+                # Process results for this batch
+                for j, result in enumerate(ranking_results):
+                    player_id = batch_ids[j]
+                    if isinstance(result, Exception):
+                        logger.error(f"Error getting ranking for player {player_id}: {result}")
+                        ranking_map[player_id] = ""
+                        timestamp_map[player_id] = ""
+                        ranking_name_map[player_id] = ""
+                    else:
+                        # Unpack the tuple returned from get_ranking_position_of_players
+                        standing, timestamp, ranking_name = result
+                        ranking_map[player_id] = standing if standing is not None else ""
+                        timestamp_map[player_id] = timestamp if timestamp is not None else ""
+                        ranking_name_map[player_id] = ranking_name if ranking_name is not None else ""
+
+                # Add delay between batches (except for last batch)
+                if i + max_concurrent_rankings < len(player_ids):
+                    await asyncio.sleep(random_delay)
+                    logger.info(f"Ranking batch complete, waiting {int(random_delay)}s before next batch...")
 
         # Build player data with ranking positions, timestamps, and ranking names
         for idx in range(len(players_lists)):
@@ -793,7 +816,7 @@ async def get_players(season_id):
                 'Player ID': player_id,
                 'Ranking Position': ranking_map.get(player_id, ""),
                 'Ranking Timestamp': timestamp_map.get(player_id, ""),
-                'Ranking Name': ranking_name_map.get(player_id, ""),  # Add ranking name field
+                'Ranking Name': ranking_name_map.get(player_id, ""),
                 'RankedInId': player_datas['RankedinId'],
                 'Name': player_datas['FirstName'],
                 'Player Order': player_datas['PlayerOrder'],
@@ -812,13 +835,134 @@ async def get_players(season_id):
 
             players_listings_dicts.append(datas)
 
+        logger.info(f"Successfully collected {len(players_listings_dicts)} players for season {season_id}")
         return players_listings_dicts
+
     except Exception as e:
         logger.error(f"Error getting players for team {season_id}: {str(e)}")
         return []
 
 
-async def collect_data_concurrently(season_id_home, season_id_away, match_ids):
+async def collect_data_concurrently(season_id_home, season_id_away, match_ids, max_concurrent=3, delay_between_batches=5):
+    """
+    Collect players, matches, and organizations data with limited concurrency
+
+    Args:
+        max_concurrent: Maximum number of concurrent tasks (default: 3)
+        delay_between_batches: Delay in seconds between batches (default: 2)
+    """
+    logger.info("Starting concurrent data collection with limited concurrency...")
+
+    # Combine home and away team IDs for unique team collection
+    all_season_ids = season_id_home + season_id_away
+    unique_season_ids = list(set(all_season_ids))
+    random_delay = await random_interval(delay_between_batches)
+
+    # Create team-match tuples with home/away distinction for matches
+    team_match_tuples = list(zip(season_id_home, season_id_away, match_ids))
+
+    # OPTION 1: Collect players data with limited concurrency
+    logger.info(f"Collecting players data for {len(unique_season_ids)} teams with max {max_concurrent} concurrent...")
+    all_players = []
+    org_season_pairs = []
+
+    # Process players in batches
+    for i in range(0, len(unique_season_ids), max_concurrent):
+        batch = unique_season_ids[i:i + max_concurrent]
+        players_tasks = [get_players(str(season_id)) for season_id in batch]
+        players_results = await asyncio.gather(*players_tasks, return_exceptions=True)
+
+        # Process results for this batch
+        for j, result in enumerate(players_results):
+            if isinstance(result, Exception):
+                logger.error(f"Error in players task {i+j}: {result}")
+                continue
+
+            if result:
+                all_players.extend(result)
+                season_id = batch[j]
+                for player in result:
+                    org_id = player.get('Team Organisation Id')
+                    if org_id:
+                        org_season_pairs.append((season_id, org_id))
+
+        # Add delay between batches (except for last batch)
+        if i + max_concurrent < len(unique_season_ids):
+            await asyncio.sleep(random_delay)
+            logger.info(f"Processed players batch {i//max_concurrent + 1}, waiting {int(random_delay)}s...")
+
+    # OPTION 2: Collect matches data with limited concurrency
+    logger.info(f"Collecting matches data for {len(team_match_tuples)} matches with max {max_concurrent} concurrent...")
+    all_matches = []
+
+    for i in range(0, len(team_match_tuples), max_concurrent):
+        batch = team_match_tuples[i:i + max_concurrent]
+        matches_tasks = [get_matches(str(home_id), str(away_id), str(match_id))
+                        for home_id, away_id, match_id in batch]
+        matches_results = await asyncio.gather(*matches_tasks, return_exceptions=True)
+
+        # Process results for this batch
+        for j, result in enumerate(matches_results):
+            if isinstance(result, Exception):
+                logger.error(f"Error in matches task {i+j}: {result}")
+                continue
+
+            if result:
+                all_matches.extend(result)
+
+        # Add delay between batches
+        if i + max_concurrent < len(team_match_tuples):
+            await asyncio.sleep(random_delay)
+            logger.info(f"Processed matches batch {i//max_concurrent + 1}, waiting {int(random_delay)}s...")
+
+    # OPTION 3: Collect organizations data with limited concurrency
+    logger.info(f"Collecting organizations data for {len(org_season_pairs)} combinations with max {max_concurrent} concurrent...")
+    all_organizations = []
+
+    for i in range(0, len(org_season_pairs), max_concurrent):
+        batch = org_season_pairs[i:i + max_concurrent]
+        org_tasks = [get_organisation_id(str(season_id), str(org_id)) for season_id, org_id in batch]
+        org_results = await asyncio.gather(*org_tasks, return_exceptions=True)
+
+        # Process results for this batch
+        for j, result in enumerate(org_results):
+            if isinstance(result, Exception):
+                logger.error(f"Error in organization task {i+j}: {result}")
+                continue
+
+            if result:
+                all_organizations.extend(result)
+
+        # Add delay between batches
+        if i + max_concurrent < len(org_season_pairs):
+            await asyncio.sleep(random_delay)
+            logger.info(f"Processed organizations batch {i//max_concurrent + 1}, waiting {int(random_delay)}s...")
+
+    # Drop duplicates from organization data
+    if all_organizations:
+        logger.info(f"Removing duplicates from {len(all_organizations)} organization records...")
+        seen_combinations = set()
+        deduplicated_orgs = []
+
+        for org in all_organizations:
+            key = (org.get('team_id_organisation'), org.get('Organisation_Id'))
+            if key not in seen_combinations:
+                seen_combinations.add(key)
+                deduplicated_orgs.append(org)
+
+        logger.info(f"Kept {len(deduplicated_orgs)} unique organization records after deduplication")
+        all_organizations = deduplicated_orgs
+
+    logger.info("Concurrent data collection completed!")
+
+    return {
+        'players': all_players,
+        'matches': all_matches,
+        'organizations': all_organizations
+    }
+
+
+'''async def collect_data_concurrently(season_id_home, season_id_away, match_ids,):
     """
     Collect players, matches, and organizations data concurrently
     """
@@ -910,9 +1054,10 @@ async def collect_data_concurrently(season_id_home, season_id_away, match_ids):
         'matches': all_matches,
         'organizations': all_organizations
     }
+'''
 
 
-async def collect_all_league_data(league_id, pool_id):
+async def collect_all_league_data(league_id, pool_id, max_concurrent = 3, delay_between_batches = 5):
     """
     Master function to collect all data for a league/pool combination with concurrent execution
     """
@@ -926,7 +1071,9 @@ async def collect_all_league_data(league_id, pool_id):
     concurrent_data = await collect_data_concurrently(
         main_data['Season_ID_Home'],
         main_data['Season_ID_Away'],
-        main_data['round_ids']
+        main_data['round_ids'],
+        max_concurrent = max_concurrent,
+        delay_between_batches = delay_between_batches
     )
 
     # Combine all data
@@ -1170,19 +1317,6 @@ async def save_batch_to_excel(batch_data: Dict):
                 format_worksheet(writer.sheets['Rounds'], rounds_df)
                 logger.info(f"Saved {len(rounds_df)} final rounds records.")
 
-            # Save consolidated players data
-            # if batch_data.get('players'):
-            #     players_df = pd.DataFrame(batch_data['players'])
-            #     cols = players_df.columns.tolist()
-            #     if 'pool_id' in cols:
-            #         # cols.remove('season_id')
-            #         cols.remove('pool_id')
-            #         cols = ['pool_id'] + cols
-            #         players_df = players_df[cols]
-
-            #     players_df.to_excel(writer, sheet_name='Players', index=False)
-            #     format_worksheet(writer.sheets['Players'], players_df)
-            #     logger.info(f'Saved {len(players_df)} final players records')
 
             # Save consolidated matches data
             if batch_data.get('matches'):
@@ -1281,43 +1415,4 @@ async def save_batch_to_excel(batch_data: Dict):
     except Exception as e:
         logger.error(f"Error saving final batch data to Excel: {str(e)}")
         return None
-
-
-async def save_all_to_excel(standings_data, rounds_data, matches_data, organizations_data, filename):
-    """
-    Save all collected data to separate sheets in an Excel file
-    """
-    try:
-        excel_filename = f'{filename}_complete_data.xlsx'  # Store the filename
-
-        with pd.ExcelWriter(excel_filename, engine='openpyxl') as writer:
-            # Save standings data
-            if standings_data:
-                pd.DataFrame(standings_data).to_excel(writer, sheet_name='Standings', index=False)
-            # Save rounds data
-            if rounds_data:
-                pd.DataFrame(rounds_data).to_excel(writer, sheet_name='Rounds', index=False)
-            # Save players data
-            # if players_data:
-            #     pd.DataFrame(players_data).to_excel(writer, sheet_name='Players', index=False)
-            if matches_data:
-            # Save matches data
-                # Convert list of dictionaries to DataFrame
-                matches_df = pd.DataFrame(matches_data)
-                # Remove completely empty set score columns to avoid the numpy array error
-                set_columns = [col for col in matches_df.columns if 'Set Score' in col]
-                for col in set_columns:
-                    if matches_df[col].isna().all() or (matches_df[col] == '').all():
-                        matches_df = matches_df.drop(columns=[col])
-                matches_df.to_excel(writer, sheet_name='Matches', index=False)
-            # Save organizations data
-            if organizations_data:
-                pd.DataFrame(organizations_data).to_excel(writer, sheet_name='Organizations', index=False)
-
-        logger.info(f"All data saved to {excel_filename}")
-        return excel_filename  # ← ADD THIS LINE - This was missing!
-
-    except Exception as e:
-        logger.error(f"Error saving to Excel: {str(e)}")
-        return None 
 
