@@ -464,6 +464,51 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
 
             return [headers] + data_rows
 
+        def expand_matches_to_7_rows(matches_df):
+            """
+            Expand each match to 7 rows for set tracking.
+            Check existing data first to avoid duplicating already expanded rows.
+            """
+            if matches_df.empty:
+                return matches_df
+
+            # Group by the key columns to identify unique matches
+            key_columns = ['season_id', 'pool_id', 'Round_ID', 'Team_Home_ID_Matches', 'Team_Away_ID_Matches']
+
+            # Check how many times each unique match combination appears
+            match_counts = matches_df.groupby(key_columns).size().reset_index(name='count')
+
+            expanded_rows = []
+
+            for _, match_group in matches_df.groupby(key_columns):
+                match_data = match_group.iloc[0].copy()  # Get the first row as template
+                current_count = len(match_group)
+
+                if current_count < 7:
+                    # Need to expand this match to 7 rows total
+                    for i in range(7):
+                        if i < current_count:
+                            # Use existing data for the first 'current_count' rows
+                            expanded_rows.append(match_group.iloc[i].copy())
+                        else:
+                            # Create new empty rows for the remaining rows
+                            new_row = match_data.copy()
+                            # Clear all columns except the key columns
+                            for col in new_row.index:
+                                if col not in key_columns:
+                                    new_row[col] = ''
+                            expanded_rows.append(new_row)
+                else:
+                    # Already has 7 or more rows, keep as is
+                    for _, row in match_group.iterrows():
+                        expanded_rows.append(row.copy())
+
+            if expanded_rows:
+                expanded_df = pd.DataFrame(expanded_rows)
+                return expanded_df.reset_index(drop=True)
+            else:
+                return matches_df
+
         def format_worksheet_preserve_manual(worksheet, data):
             """
             Only updates the automated data section, preserves manual additions
@@ -480,29 +525,9 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
                     col_num //= 26
                 return result
 
-            # Get existing data to check for manual additions
-            try:
-                existing_data = worksheet.get_all_values()
-                existing_rows = len(existing_data) if existing_data else 0
-                new_data_rows = len(data)
-
-                # Clear only the area where new data will be written
-                if existing_rows > 0:
-                    # Clear from A1 to the end of new data columns
-                    end_col = column_number_to_letter(len(data[0])) if data and data[0] else 'A'
-                    clear_range = f'A1:{end_col}{new_data_rows}'
-                    worksheet.batch_clear([clear_range])
-
-                # Write new data
-                worksheet.update('A1', data)
-
-                # If there were manual rows beyond the new data, they remain untouched
-                logger.info(f"Preserved {max(0, existing_rows - new_data_rows)} manual rows in {worksheet.title}")
-
-            except Exception as e:
-                # Fallback to original behavior if there's an issue
-                logger.info(f"Could not preserve manual data in {worksheet.title}: {e}")
-                worksheet.clear()
+            # Clear existing data and update with new data
+            worksheet.clear()
+            if data:
                 worksheet.update('A1', data)
 
             # Format headers
@@ -557,20 +582,7 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
             format_worksheet_preserve_manual(rounds_sheet, rounds_data)
             await asyncio.sleep(1)
 
-        # Save Players
-        # if batch_data.get('players'):
-        #     players_df = pd.DataFrame(batch_data['players'])
-        #     cols = players_df.columns.tolist()
-        #     if 'pool_id' in cols:
-        #         # cols.remove('season_id')
-        #         cols.remove('pool_id')
-        #         cols = ['pool_id'] + cols
-        #     players_sheet = get_or_create_sheet('Players')
-        #     sheets_created.append('Players')
-        #     players_data = format_dataframe_for_sheets(players_df)
-        #     format_worksheet_preserve_manual(players_sheet, players_data)
-        #     await asyncio.sleep(1)
-       # Save Matches
+        # Save Matches - WITH EXPANSION TO 7 ROWS
         if batch_data.get('matches'):
             matches_df = pd.DataFrame(batch_data['matches'])
             cols = matches_df.columns.tolist()
@@ -580,6 +592,26 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
                 cols = ['season_id', 'pool_id'] + cols
                 matches_df = matches_df[cols]
 
+            # Get existing matches data to check for already expanded rows
+            try:
+                matches_sheet = get_or_create_sheet('Matches')
+                existing_data = matches_sheet.get_all_records()
+                if existing_data:
+                    existing_df = pd.DataFrame(existing_data)
+                    # Combine existing and new data
+                    combined_df = pd.concat([existing_df, matches_df], ignore_index=True)
+                    # Remove duplicates based on key columns
+                    key_columns = ['season_id', 'pool_id', 'Round_ID', 'Team_Home_ID_Matches', 'Team_Away_ID_Matches']
+                    combined_df = combined_df.drop_duplicates(subset=key_columns + [col for col in combined_df.columns if col not in key_columns and combined_df[col].notna().any()], keep='first')
+                    matches_df = combined_df
+            except:
+                # If we can't read existing data, just use new data
+                pass
+
+            # Expand matches to 7 rows each
+            matches_df = expand_matches_to_7_rows(matches_df)
+
+            # Remove empty set score columns
             set_columns = [col for col in matches_df.columns if 'Set Score' in col]
             for col in set_columns:
                 if matches_df[col].isna().all() or (matches_df[col] == '').all():
