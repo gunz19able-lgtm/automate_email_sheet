@@ -16,6 +16,7 @@ CLIENT_EMAIL = os.getenv('CLIENT_EMAIL')
 
 async def main():
     league_pool_combinations = await load_league_pool_combinations_from_google_sheets()
+
     recipients = [
         CLIENT_EMAIL,
     ]
@@ -30,7 +31,7 @@ async def main():
         bcc_emails = bcc_recipients if bcc_recipients else None,
         client_email = CLIENT_EMAIL,
         delay = 5,
-        batches = 5
+        batches = 3
 
     )
 
