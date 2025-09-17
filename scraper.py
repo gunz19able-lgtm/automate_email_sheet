@@ -1261,8 +1261,53 @@ async def save_batch_to_excel(batch_data: Dict):
     timestamp = datetime.now(ZoneInfo("Europe/Copenhagen")).strftime("%Y-%m-%d_%H_%M_%S")
     division_name = await division_name_call(season_id)
     output_name = f"{division_name}_{timestamp}.xlsx"
-    try:
 
+    def expand_matches_to_7_rows(matches_df):
+        """
+        Expand each match to 7 rows for set tracking.
+        Check existing data first to avoid duplicating already expanded rows.
+        """
+        if matches_df.empty:
+            return matches_df
+
+        # Group by the key columns to identify unique matches
+        key_columns = ['season_id', 'pool_id', 'Round_ID', 'Team_Home_ID_Matches', 'Team_Away_ID_Matches']
+
+        # Check how many times each unique match combination appears
+        match_counts = matches_df.groupby(key_columns).size().reset_index(name='count')
+
+        expanded_rows = []
+
+        for _, match_group in matches_df.groupby(key_columns):
+            match_data = match_group.iloc[0].copy()  # Get the first row as template
+            current_count = len(match_group)
+
+            if current_count < 7:
+                # Need to expand this match to 7 rows total
+                for i in range(7):
+                    if i < current_count:
+                        # Use existing data for the first 'current_count' rows
+                        expanded_rows.append(match_group.iloc[i].copy())
+                    else:
+                        # Create new empty rows for the remaining rows
+                        new_row = match_data.copy()
+                        # Clear all columns except the key columns
+                        for col in new_row.index:
+                            if col not in key_columns:
+                                new_row[col] = ''
+                        expanded_rows.append(new_row)
+            else:
+                # Already has 7 or more rows, keep as is
+                for _, row in match_group.iterrows():
+                    expanded_rows.append(row.copy())
+
+        if expanded_rows:
+            expanded_df = pd.DataFrame(expanded_rows)
+            return expanded_df.reset_index(drop=True)
+        else:
+            return matches_df
+
+    try:
         with pd.ExcelWriter(f"{output_name}", engine='openpyxl') as writer:
 
             def format_worksheet(worksheet, dataframe):
@@ -1317,8 +1362,7 @@ async def save_batch_to_excel(batch_data: Dict):
                 format_worksheet(writer.sheets['Rounds'], rounds_df)
                 logger.info(f"Saved {len(rounds_df)} final rounds records.")
 
-
-            # Save consolidated matches data
+            # Save consolidated matches data - WITH EXPANSION TO 7 ROWS
             if batch_data.get('matches'):
                 matches_df = pd.DataFrame(batch_data['matches'])
                 cols = matches_df.columns.tolist()
@@ -1328,6 +1372,21 @@ async def save_batch_to_excel(batch_data: Dict):
                     cols = ['season_id', 'pool_id'] + cols
                     matches_df = matches_df[cols]
 
+                # Check if we need to load existing Excel data for comparison
+                # (This would be needed if you're updating an existing file)
+                try:
+                    # If updating existing file, you could load it here
+                    # existing_df = pd.read_excel(output_name, sheet_name='Matches')
+                    # combined_df = pd.concat([existing_df, matches_df], ignore_index=True)
+                    # matches_df = combined_df.drop_duplicates(subset=key_columns, keep='first')
+                    pass
+                except:
+                    # New file, use current data
+                    pass
+
+                # Expand matches to 7 rows each
+                matches_df = expand_matches_to_7_rows(matches_df)
+
                 # Remove empty set score columns
                 set_columns = [col for col in matches_df.columns if 'Set Score' in col]
                 for col in set_columns:
@@ -1336,7 +1395,7 @@ async def save_batch_to_excel(batch_data: Dict):
 
                 matches_df.to_excel(writer, sheet_name='Matches', index=False)
                 format_worksheet(writer.sheets['Matches'], matches_df)
-                logger.info(f"Saved {len(matches_df)} final matches records.")
+                logger.info(f"Saved {len(matches_df)} final matches records (expanded to 7 rows per match).")
 
             # Save consolidated organizations data
             if batch_data.get('organizations'):
@@ -1408,8 +1467,15 @@ async def save_batch_to_excel(batch_data: Dict):
                             'Records_Found': 'No'
                         })
 
+                # Save processing results if there are any
+                if processing_results:
+                    processing_df = pd.DataFrame(processing_results)
+                    processing_df.to_excel(writer, sheet_name='Processing_Results', index=False)
+                    format_worksheet(writer.sheets['Processing_Results'], processing_df)
+
         logger.info(f"Final batch report saved to {output_name}")
         logger.info(f"Report contains consolidated data from all processed league-pool combinations")
+        logger.info(f"Matches have been expanded to 7 rows per unique match for set tracking")
         return output_name
 
     except Exception as e:
