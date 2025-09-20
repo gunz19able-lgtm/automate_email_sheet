@@ -54,6 +54,7 @@ async def random_interval(interval):
 
 
 async def make_requests(url, headers):
+    random_delay = await random_interval(5)
     for attempt in range(5):
         try:
             async with AsyncClient(
@@ -67,13 +68,17 @@ async def make_requests(url, headers):
                 else:
                     logger.info(f"Attempt {attempt + 1}: Status code {response.status_code}")
                     if attempt < 4:  # Don't sleep after the last attempt
-                        await asyncio.sleep(2)
+                        # Exponential backoff: 2^attempt + random jitter
+                        delay = (2 ** attempt) + random_delay
+                        await asyncio.sleep(delay)
                     continue  # Retry on non-200 status codes
 
         except Exception as e:
             logger.info(f"Attempt {attempt + 1} failed: {str(e)}")
             if attempt < 4:
-                await asyncio.sleep(2)
+                # Exponential backoff: 2^attempt + random jitter
+                delay = (2 ** attempt) + random_delay
+                await asyncio.sleep(delay)
             continue
 
     return "Failed after 5 attempts"  # Only return string after all attempts fail
