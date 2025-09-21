@@ -466,47 +466,236 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
 
         def expand_matches_to_7_rows(matches_df):
             """
-            Expand each Round_ID to 7 rows for set tracking.
-            Check existing data first to avoid duplicating already expanded rows.
+            Ensure each Round_ID has exactly 7 rows total.
+            For each Round_ID, ALL 7 rows will have the same Team_Home_ID_Matches and Team_Away_ID_Matches values.
+            If a Round_ID has fewer than 7 rows, add empty rows to reach exactly 7.
+            If a Round_ID has more than 7 rows, keep only the first 7 rows.
             """
             if matches_df.empty:
                 return matches_df
 
+            if 'Round_ID' not in matches_df.columns:
+                logger.warning("Round_ID column not found, returning original DataFrame")
+                return matches_df
+
+            logger.info("Starting round processing to exactly 7 rows per Round_ID with consistent Team IDs")
+            logger.info(f"Available columns: {matches_df.columns.tolist()}")
+
+            # Find the correct column names for Team IDs (handle different naming variations)
+            team_home_col = None
+            team_away_col = None
+
+            possible_home_names = ['Team_Home_ID_Matches', 'Team_ID_Home_Matches', 'Team_Home_ID', 'Home_Team_ID']
+            possible_away_names = ['Team_Away_ID_Matches', 'Team_ID_Away_Matches', 'Team_Away_ID', 'Away_Team_ID']
+
+            for col in matches_df.columns:
+                if col in possible_home_names:
+                    team_home_col = col
+                if col in possible_away_names:
+                    team_away_col = col
+
+            logger.info(f"Found Team Home column: {team_home_col}")
+            logger.info(f"Found Team Away column: {team_away_col}")
+
             # Group by Round_ID to identify unique rounds
             round_counts = matches_df['Round_ID'].value_counts()
+            logger.info(f"Found {len(round_counts)} unique Round_IDs")
 
             expanded_rows = []
+            rounds_expanded = 0
+            rounds_trimmed = 0
+            rows_added = 0
+            rows_removed = 0
 
             for round_id in matches_df['Round_ID'].unique():
                 round_matches = matches_df[matches_df['Round_ID'] == round_id]
                 current_count = len(round_matches)
 
+                # Get the template row (first row) to extract consistent values
+                template_row = round_matches.iloc[0].copy()
+
+                # Extract the consistent values that should be the same for all rows in this Round_ID
+                consistent_values = {
+                    'season_id': template_row.get('season_id', ''),
+                    'pool_id': template_row.get('pool_id', ''),
+                    'Round_ID': round_id,
+                }
+
+                # Add team ID values if columns exist
+                if team_home_col:
+                    consistent_values[team_home_col] = template_row.get(team_home_col, '')
+                if team_away_col:
+                    consistent_values[team_away_col] = template_row.get(team_away_col, '')
+
+                logger.debug(f"Round_ID {round_id}: Consistent values = {consistent_values}")
+
                 if current_count < 7:
-                    # Add existing rows first
+                    # First, add existing rows but ensure they have consistent Team IDs
                     for _, row in round_matches.iterrows():
-                        expanded_rows.append(row.copy())
+                        updated_row = row.copy()
+                        # Ensure consistent values for all rows in this Round_ID
+                        for key, value in consistent_values.items():
+                            if key in updated_row.index:
+                                updated_row[key] = value
+                        expanded_rows.append(updated_row)
 
-                    # Create additional empty rows to reach 7 total
-                    template_row = round_matches.iloc[0].copy()  # Use first row as template
-
-                    for i in range(7 - current_count):
+                    # Add empty rows to reach exactly 7 total
+                    rows_to_add = 7 - current_count
+                    for i in range(rows_to_add):
                         new_row = template_row.copy()
-                        # Clear all columns except key identifiers
-                        key_columns = ['season_id', 'pool_id', 'Round_ID']
+
+                        # Set consistent values first
+                        for key, value in consistent_values.items():
+                            if key in new_row.index:
+                                new_row[key] = value
+
+                        # Clear all other columns except the consistent ones
+                        preserve_columns = list(consistent_values.keys())
                         for col in new_row.index:
-                            if col not in key_columns:
+                            if col not in preserve_columns:
                                 new_row[col] = ''
+
                         expanded_rows.append(new_row)
-                else:
-                    # Already has 7 or more rows, keep as is
+
+                    rounds_expanded += 1
+                    rows_added += rows_to_add
+                    logger.debug(f"Round_ID {round_id}: Had {current_count} rows, added {rows_to_add} empty rows to reach 7 total")
+
+                elif current_count == 7:
+                    # Perfect - add all 7 rows but ensure consistent Team IDs
                     for _, row in round_matches.iterrows():
-                        expanded_rows.append(row.copy())
+                        updated_row = row.copy()
+                        # Ensure consistent values for all rows in this Round_ID
+                        for key, value in consistent_values.items():
+                            if key in updated_row.index:
+                                updated_row[key] = value
+                        expanded_rows.append(updated_row)
+                    logger.debug(f"Round_ID {round_id}: Already has exactly 7 rows")
+
+                else:
+                    # More than 7 rows - keep only the first 7 but ensure consistent Team IDs
+                    for i, (_, row) in enumerate(round_matches.iterrows()):
+                        if i < 7:
+                            updated_row = row.copy()
+                            # Ensure consistent values for all rows in this Round_ID
+                            for key, value in consistent_values.items():
+                                if key in updated_row.index:
+                                    updated_row[key] = value
+                            expanded_rows.append(updated_row)
+                        else:
+                            break
+
+                    rounds_trimmed += 1
+                    rows_removed += (current_count - 7)
+                    logger.debug(f"Round_ID {round_id}: Had {current_count} rows, trimmed to 7 rows (removed {current_count - 7} rows)")
+
+            logger.info(f"Processed {len(round_counts)} rounds: expanded {rounds_expanded} rounds (added {rows_added} rows), trimmed {rounds_trimmed} rounds (removed {rows_removed} rows)")
 
             if expanded_rows:
                 expanded_df = pd.DataFrame(expanded_rows)
+
+                # Final verification - log a sample of the results
+                if not expanded_df.empty:
+                    sample_round = expanded_df['Round_ID'].iloc[0]
+                    sample_data = expanded_df[expanded_df['Round_ID'] == sample_round]
+                    logger.info(f"Sample verification for Round_ID {sample_round}:")
+                    for col in [team_home_col, team_away_col]:
+                        if col and col in sample_data.columns:
+                            unique_values = sample_data[col].unique()
+                            logger.info(f"  {col}: {unique_values} (should have only 1 unique value)")
+
                 return expanded_df.reset_index(drop=True)
             else:
                 return matches_df
+
+        def remove_empty_rows(df):
+            """
+            Remove empty/placeholder rows that were created during expansion.
+            Only removes rows that have no meaningful data (only key columns filled).
+            Preserves all rows with actual player data or match information.
+            Also preserves rows that have Team_ID information even if other data is empty.
+            """
+            if df.empty:
+                return df
+
+            initial_count = len(df)
+            logger.info(f"Starting empty row removal with {initial_count} rows")
+
+            # Find the correct column names for Team IDs (handle different naming variations)
+            team_home_col = None
+            team_away_col = None
+
+            possible_home_names = ['Team_Home_ID_Matches', 'Team_ID_Home_Matches', 'Team_Home_ID', 'Home_Team_ID']
+            possible_away_names = ['Team_Away_ID_Matches', 'Team_ID_Away_Matches', 'Team_Away_ID', 'Away_Team_ID']
+
+            for col in df.columns:
+                if col in possible_home_names:
+                    team_home_col = col
+                if col in possible_away_names:
+                    team_away_col = col
+
+            # Define key columns that should always have values (identifier columns)
+            key_columns = ['season_id', 'pool_id', 'Round_ID']
+
+            # Define team ID columns that indicate this is a valid match row
+            team_id_columns = []
+            if team_home_col:
+                team_id_columns.append(team_home_col)
+            if team_away_col:
+                team_id_columns.append(team_away_col)
+
+            # Define data columns that indicate this is a real match row (not empty placeholder)
+            data_columns = []
+            for col in df.columns:
+                if col not in key_columns and col not in team_id_columns and any(keyword in col.lower() for keyword in
+                    ['player', 'team', 'score', 'match', 'set', 'game', 'win', 'loss', 'point', 'name']):
+                    data_columns.append(col)
+
+            # If no data columns found, use all non-key columns (excluding team ID columns)
+            if not data_columns:
+                data_columns = [col for col in df.columns if col not in key_columns and col not in team_id_columns]
+
+            logger.info(f"Key columns: {key_columns}")
+            logger.info(f"Team ID columns: {team_id_columns}")
+            logger.info(f"Data columns to check: {len(data_columns)} columns")
+
+            # Identify rows to keep: rows that have meaningful data in data columns OR have team ID information
+            rows_to_keep = []
+            empty_rows_removed = 0
+
+            for idx, row in df.iterrows():
+                # Check if this row has any meaningful data in data columns
+                has_data = False
+
+                # First check data columns
+                for col in data_columns:
+                    value = row[col]
+                    if pd.notna(value) and str(value).strip() != '':
+                        has_data = True
+                        break
+
+                # If no data found, check if it has team ID information (which we want to preserve)
+                if not has_data:
+                    for col in team_id_columns:
+                        if col in row.index:
+                            value = row[col]
+                            if pd.notna(value) and str(value).strip() != '':
+                                has_data = True
+                                break
+
+                if has_data:
+                    rows_to_keep.append(idx)
+                else:
+                    empty_rows_removed += 1
+                    logger.debug(f"Removing empty row with Round_ID: {row.get('Round_ID', 'Unknown')}")
+
+            # Keep only rows with actual data or team ID information
+            df_cleaned = df.loc[rows_to_keep].copy()
+
+            final_count = len(df_cleaned)
+            logger.info(f"Removed {empty_rows_removed} empty placeholder rows, {final_count} rows remaining")
+
+            return df_cleaned.reset_index(drop=True)
 
         def format_worksheet_preserve_manual(worksheet, data):
             """
@@ -591,23 +780,13 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
                 cols = ['season_id', 'pool_id'] + cols
                 matches_df = matches_df[cols]
 
-            # Get existing matches data to check for already expanded rows
-            try:
-                matches_sheet = get_or_create_sheet('Matches')
-                existing_data = matches_sheet.get_all_records()
-                if existing_data:
-                    existing_df = pd.DataFrame(existing_data)
-                    # Combine existing and new data
-                    combined_df = pd.concat([existing_df, matches_df], ignore_index=True)
-                    # Remove duplicates based on key columns
-                    key_columns = ['season_id', 'pool_id', 'Round_ID', 'Team_Home_ID_Matches', 'Team_Away_ID_Matches']
-                    combined_df = combined_df.drop_duplicates(subset=key_columns + [col for col in combined_df.columns if col not in key_columns and combined_df[col].notna().any()], keep='first')
-                    matches_df = combined_df
-            except:
-                # If we can't read existing data, just use new data
-                pass
+            # DON'T merge with existing data - start fresh each time to ensure consistency
+            # This prevents issues with empty Team ID values from previous runs
 
-            # Expand matches to 7 rows each
+            # First remove any empty duplicate rows
+            matches_df = remove_empty_rows(matches_df)
+
+            # Then expand matches to exactly 7 rows per Round_ID
             matches_df = expand_matches_to_7_rows(matches_df)
 
             # Remove empty set score columns
