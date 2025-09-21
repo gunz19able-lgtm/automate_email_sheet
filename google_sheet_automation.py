@@ -466,41 +466,40 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
 
         def expand_matches_to_7_rows(matches_df):
             """
-            Expand each match to 7 rows for set tracking.
+            Expand each Round_ID to 7 rows for set tracking.
             Check existing data first to avoid duplicating already expanded rows.
             """
             if matches_df.empty:
                 return matches_df
 
-            # Group by the key columns to identify unique matches
-            key_columns = ['season_id', 'pool_id', 'Round_ID', 'Team_Home_ID_Matches', 'Team_Away_ID_Matches']
-
-            # Check how many times each unique match combination appears
-            match_counts = matches_df.groupby(key_columns).size().reset_index(name='count')
+            # Group by Round_ID to identify unique rounds
+            round_counts = matches_df['Round_ID'].value_counts()
 
             expanded_rows = []
 
-            for _, match_group in matches_df.groupby(key_columns):
-                match_data = match_group.iloc[0].copy()  # Get the first row as template
-                current_count = len(match_group)
+            for round_id in matches_df['Round_ID'].unique():
+                round_matches = matches_df[matches_df['Round_ID'] == round_id]
+                current_count = len(round_matches)
 
                 if current_count < 7:
-                    # Need to expand this match to 7 rows total
-                    for i in range(7):
-                        if i < current_count:
-                            # Use existing data for the first 'current_count' rows
-                            expanded_rows.append(match_group.iloc[i].copy())
-                        else:
-                            # Create new empty rows for the remaining rows
-                            new_row = match_data.copy()
-                            # Clear all columns except the key columns
-                            for col in new_row.index:
-                                if col not in key_columns:
-                                    new_row[col] = ''
-                            expanded_rows.append(new_row)
+                    # Add existing rows first
+                    for _, row in round_matches.iterrows():
+                        expanded_rows.append(row.copy())
+
+                    # Create additional empty rows to reach 7 total
+                    template_row = round_matches.iloc[0].copy()  # Use first row as template
+
+                    for i in range(7 - current_count):
+                        new_row = template_row.copy()
+                        # Clear all columns except key identifiers
+                        key_columns = ['season_id', 'pool_id', 'Round_ID']
+                        for col in new_row.index:
+                            if col not in key_columns:
+                                new_row[col] = ''
+                        expanded_rows.append(new_row)
                 else:
                     # Already has 7 or more rows, keep as is
-                    for _, row in match_group.iterrows():
+                    for _, row in round_matches.iterrows():
                         expanded_rows.append(row.copy())
 
             if expanded_rows:
