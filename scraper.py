@@ -1264,48 +1264,140 @@ async def save_batch_to_excel(batch_data: Dict):
 
     def expand_matches_to_7_rows(matches_df):
         """
-        Expand each match to 7 rows for set tracking.
-        Check existing data first to avoid duplicating already expanded rows.
+        Ensure each Round_ID has exactly 7 rows total.
+        If a Round_ID has fewer than 7 rows, add empty rows to reach exactly 7.
+        If a Round_ID has more than 7 rows, keep only the first 7 rows.
         """
         if matches_df.empty:
             return matches_df
 
-        # Group by the key columns to identify unique matches
-        key_columns = ['season_id', 'pool_id', 'Round_ID', 'Team_Home_ID_Matches', 'Team_Away_ID_Matches']
+        if 'Round_ID' not in matches_df.columns:
+            logger.warning("Round_ID column not found, returning original DataFrame")
+            return matches_df
 
-        # Check how many times each unique match combination appears
-        match_counts = matches_df.groupby(key_columns).size().reset_index(name='count')
+        logger.info("Starting round processing to exactly 7 rows per Round_ID")
+
+        # Group by Round_ID to identify unique rounds
+        round_counts = matches_df['Round_ID'].value_counts()
+        logger.info(f"Found {len(round_counts)} unique Round_IDs")
 
         expanded_rows = []
+        rounds_expanded = 0
+        rounds_trimmed = 0
+        rows_added = 0
+        rows_removed = 0
 
-        for _, match_group in matches_df.groupby(key_columns):
-            match_data = match_group.iloc[0].copy()  # Get the first row as template
-            current_count = len(match_group)
+        for round_id in matches_df['Round_ID'].unique():
+            round_matches = matches_df[matches_df['Round_ID'] == round_id]
+            current_count = len(round_matches)
 
             if current_count < 7:
-                # Need to expand this match to 7 rows total
-                for i in range(7):
-                    if i < current_count:
-                        # Use existing data for the first 'current_count' rows
-                        expanded_rows.append(match_group.iloc[i].copy())
-                    else:
-                        # Create new empty rows for the remaining rows
-                        new_row = match_data.copy()
-                        # Clear all columns except the key columns
-                        for col in new_row.index:
-                            if col not in key_columns:
-                                new_row[col] = ''
-                        expanded_rows.append(new_row)
-            else:
-                # Already has 7 or more rows, keep as is
-                for _, row in match_group.iterrows():
+                # Add all existing rows first
+                for _, row in round_matches.iterrows():
                     expanded_rows.append(row.copy())
+
+                # Add empty rows to reach exactly 7 total
+                template_row = round_matches.iloc[0].copy()  # Use first row as template
+
+                rows_to_add = 7 - current_count
+                for i in range(rows_to_add):
+                    new_row = template_row.copy()
+                    # Clear all columns except key identifiers
+                    key_columns = ['season_id', 'pool_id', 'Round_ID']
+                    for col in new_row.index:
+                        if col not in key_columns:
+                            new_row[col] = ''
+                    expanded_rows.append(new_row)
+
+                rounds_expanded += 1
+                rows_added += rows_to_add
+                logger.debug(f"Round_ID {round_id}: Had {current_count} rows, added {rows_to_add} empty rows to reach 7 total")
+
+            elif current_count == 7:
+                # Perfect - add all 7 rows
+                for _, row in round_matches.iterrows():
+                    expanded_rows.append(row.copy())
+                logger.debug(f"Round_ID {round_id}: Already has exactly 7 rows")
+
+            else:
+                # More than 7 rows - keep only the first 7
+                for i, (_, row) in enumerate(round_matches.iterrows()):
+                    if i < 7:
+                        expanded_rows.append(row.copy())
+                    else:
+                        break
+
+                rounds_trimmed += 1
+                rows_removed += (current_count - 7)
+                logger.debug(f"Round_ID {round_id}: Had {current_count} rows, trimmed to 7 rows (removed {current_count - 7} rows)")
+
+        logger.info(f"Processed {len(round_counts)} rounds: expanded {rounds_expanded} rounds (added {rows_added} rows), trimmed {rounds_trimmed} rounds (removed {rows_removed} rows)")
 
         if expanded_rows:
             expanded_df = pd.DataFrame(expanded_rows)
             return expanded_df.reset_index(drop=True)
         else:
             return matches_df
+
+    def remove_empty_duplicate_rows(matches_df):
+        """
+        Remove empty/placeholder rows that were created during expansion.
+        Only removes rows that have no meaningful data (only key columns filled).
+        Preserves all rows with actual player data or match information.
+        """
+        if matches_df.empty:
+            return matches_df
+
+        logger.info(f"Starting empty row removal with {len(matches_df)} rows")
+
+        # Check if Round_ID column exists
+        if 'Round_ID' not in matches_df.columns:
+            logger.warning("Round_ID column not found for empty row removal")
+            return matches_df
+
+        # Define key columns that should always have values (identifier columns)
+        key_columns = ['season_id', 'pool_id', 'Round_ID']
+
+        # Define data columns that indicate this is a real match row (not empty placeholder)
+        data_columns = []
+        for col in matches_df.columns:
+            if col not in key_columns and any(keyword in col.lower() for keyword in
+                ['player', 'team', 'score', 'match', 'set', 'game', 'win', 'loss', 'point', 'name']):
+                data_columns.append(col)
+
+        # If no data columns found, use all non-key columns
+        if not data_columns:
+            data_columns = [col for col in matches_df.columns if col not in key_columns]
+
+        logger.info(f"Key columns: {key_columns}")
+        logger.info(f"Data columns to check: {len(data_columns)} columns")
+
+        # Identify rows to keep: rows that have meaningful data in data columns
+        rows_to_keep = []
+        empty_rows_removed = 0
+
+        for idx, row in matches_df.iterrows():
+            # Check if this row has any meaningful data in data columns
+            has_data = False
+            for col in data_columns:
+                value = row[col]
+                if pd.notna(value) and str(value).strip() != '':
+                    has_data = True
+                    break
+
+            if has_data:
+                rows_to_keep.append(idx)
+            else:
+                empty_rows_removed += 1
+                logger.debug(f"Removing empty row with Round_ID: {row.get('Round_ID', 'Unknown')}")
+
+        # Keep only rows with actual data
+        df_cleaned = matches_df.loc[rows_to_keep].copy()
+
+        final_count = len(df_cleaned)
+        logger.info(f"Removed {empty_rows_removed} empty placeholder rows, {final_count} rows remaining")
+
+        return df_cleaned.reset_index(drop=True)
 
     try:
         with pd.ExcelWriter(f"{output_name}", engine='openpyxl') as writer:
@@ -1362,7 +1454,7 @@ async def save_batch_to_excel(batch_data: Dict):
                 format_worksheet(writer.sheets['Rounds'], rounds_df)
                 logger.info(f"Saved {len(rounds_df)} final rounds records.")
 
-            # Save consolidated matches data - WITH EXPANSION TO 7 ROWS
+            # Save consolidated matches data - WITH IMPROVED EXPANSION TO EXACTLY 7 ROWS
             if batch_data.get('matches'):
                 matches_df = pd.DataFrame(batch_data['matches'])
                 cols = matches_df.columns.tolist()
@@ -1378,13 +1470,17 @@ async def save_batch_to_excel(batch_data: Dict):
                     # If updating existing file, you could load it here
                     # existing_df = pd.read_excel(output_name, sheet_name='Matches')
                     # combined_df = pd.concat([existing_df, matches_df], ignore_index=True)
-                    # matches_df = combined_df.drop_duplicates(subset=key_columns, keep='first')
+                    # First remove empty duplicates, then expand
+                    # matches_df = remove_empty_duplicate_rows(combined_df)
                     pass
                 except:
                     # New file, use current data
                     pass
 
-                # Expand matches to 7 rows each
+                # First remove any empty duplicate rows
+                matches_df = remove_empty_duplicate_rows(matches_df)
+
+                # Then expand matches to exactly 7 rows per Round_ID
                 matches_df = expand_matches_to_7_rows(matches_df)
 
                 # Remove empty set score columns
@@ -1395,7 +1491,7 @@ async def save_batch_to_excel(batch_data: Dict):
 
                 matches_df.to_excel(writer, sheet_name='Matches', index=False)
                 format_worksheet(writer.sheets['Matches'], matches_df)
-                logger.info(f"Saved {len(matches_df)} final matches records (expanded to 7 rows per match).")
+                logger.info(f"Saved {len(matches_df)} final matches records (exactly 7 rows per Round_ID).")
 
             # Save consolidated organizations data
             if batch_data.get('organizations'):
@@ -1475,10 +1571,9 @@ async def save_batch_to_excel(batch_data: Dict):
 
         logger.info(f"Final batch report saved to {output_name}")
         logger.info(f"Report contains consolidated data from all processed league-pool combinations")
-        logger.info(f"Matches have been expanded to 7 rows per unique match for set tracking")
+        logger.info(f"Each Round_ID has been processed to have exactly 7 rows for set tracking")
         return output_name
 
     except Exception as e:
         logger.error(f"Error saving final batch data to Excel: {str(e)}")
         return None
-
