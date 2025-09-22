@@ -7,6 +7,7 @@ from datetime import datetime
 import gspread.exceptions
 from typing import Dict
 import pandas as pd
+import traceback
 import asyncio
 import gspread
 import os
@@ -198,6 +199,22 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
 
             if team_league_df_data:
                 team_league_df = pd.DataFrame(team_league_df_data)
+
+                # Add number_team_ids column
+                # Count how many times each rankedIn_id appears associated with team_id
+                if 'rankedIn_id' in team_league_df.columns and 'team_id' in team_league_df.columns:
+                    # Create a count mapping for rankedIn_id occurrences
+                    rankedIn_id_counts = team_league_df['rankedIn_id'].value_counts().to_dict()
+
+                    # Add the count column
+                    team_league_df['number_team_ids'] = team_league_df['rankedIn_id'].map(rankedIn_id_counts)
+
+                    # Handle any NaN values that might occur from mapping
+                    team_league_df['number_team_ids'] = team_league_df['number_team_ids'].fillna(0).astype(int)
+                else:
+                    # If required columns don't exist, add a column with 0s
+                    team_league_df['number_team_ids'] = 0
+
                 team_league_sheet = create_or_get_worksheet(spreadsheet, 'team_league')
                 team_league_data = format_dataframe_for_sheets(team_league_df)
                 format_worksheet(team_league_sheet, team_league_data)
@@ -301,7 +318,6 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
     except Exception as e:
         logger.error(f"Error saving players data to Google Sheets: {str(e)}")
         logger.error(f"Error details: {type(e).__name__}")
-        import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return None
 
