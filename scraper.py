@@ -732,7 +732,7 @@ async def get_player_image_url(rankedin_id):
         return ""
 
 
-async def get_players(season_id, max_concurrent_rankings=3, delay_between_batches=5):
+async def get_players(team_id, max_concurrent_rankings=3, delay_between_batches=5):
     """
     Get players data with limited concurrency for ranking position requests
 
@@ -752,7 +752,7 @@ async def get_players(season_id, max_concurrent_rankings=3, delay_between_batche
         'Connection': 'keep-alive',
         'Cookie': 'ai_user=DFzEjMtcUnEUDoZhTMKlbQ^|2025-08-11T18:49:59.686Z; __stripe_mid=6d617d98-f9ca-4fb0-b4f7-dfc799d68f5a760a87; modal-ads={%22_playerId%22:null%2C%22_ads%22:[{%22_id%22:9%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:10%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:4%2C%22_lastAdDate%22:%222025-08-11%22}]}; ARRAffinity=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; ARRAffinitySameSite=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; language=en',
     }
-    url = f"https://rankedin.com/team/tlhomepage/{season_id}"
+    url = f"https://api.rankedin.com/v1/TeamLeague/GetTeamLeagueTeamHomepageAsync?teamId={team_id}&language=en"
     random_delay = await random_interval(delay_between_batches)
 
     try:
@@ -771,7 +771,7 @@ async def get_players(season_id, max_concurrent_rankings=3, delay_between_batche
         ranking_name_map = {}
 
         if player_ids:
-            logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {season_id} with max {max_concurrent_rankings} concurrent...")
+            logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {team_id} with max {max_concurrent_rankings} concurrent...")
 
             # Process ranking requests in batches
             for i in range(0, len(player_ids), max_concurrent_rankings):
@@ -808,7 +808,7 @@ async def get_players(season_id, max_concurrent_rankings=3, delay_between_batche
             player_id = player_datas['Id']
 
             datas = {
-                'Team_ID_Players': season_id,
+                'Team_ID_Players': team_id,
                 'Pool ID': raw_datas['PoolId'],
                 'Team League ID': raw_datas['TeamLeagueId'],
                 'Team League Name': raw_datas['TeamLeagueName'],
@@ -835,11 +835,11 @@ async def get_players(season_id, max_concurrent_rankings=3, delay_between_batche
 
             players_listings_dicts.append(datas)
 
-        logger.info(f"Successfully collected {len(players_listings_dicts)} players for season {season_id}")
+        logger.info(f"Successfully collected {len(players_listings_dicts)} players for season {team_id}")
         return players_listings_dicts
 
     except Exception as e:
-        logger.error(f"Error getting players for team {season_id}: {str(e)}")
+        logger.error(f"Error getting players for team {team_id}: {str(e)}")
         return []
 
 
