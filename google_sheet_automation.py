@@ -168,6 +168,9 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
             except gspread.WorksheetNotFound:
                 return spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=26)
 
+        # Store team_league data for later use
+        team_league_df = None
+
         # Process players data directly from comparison_result
         if players_result.get('players'):
             players_df = pd.DataFrame(players_result['players'])
@@ -295,6 +298,76 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
                 ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
                 ranking_sheet.clear()
                 ranking_sheet.update('A1', [['No ranking columns available']])
+
+            # Final check: Create/update players_table sheet with team_id and number_team_ids
+            # Check if players_table sheet exists and get its data
+            try:
+                players_table_sheet = spreadsheet.worksheet('players_table')
+                players_table_data = players_table_sheet.get_all_records()
+
+                if players_table_data:
+                    # Convert to DataFrame
+                    players_table_df = pd.DataFrame(players_table_data)
+
+                    # Check if rankedIn_id column exists in players_table
+                    rankedIn_col_players_table = None
+                    possible_rankedIn_cols = ['RankedInId', 'rankedIn_id', 'rankedin_id']
+
+                    for col in possible_rankedIn_cols:
+                        if col in players_table_df.columns:
+                            rankedIn_col_players_table = col
+                            break
+
+                    if rankedIn_col_players_table and team_league_df is not None:
+                        logger.info(f"Found rankedIn_id column in players_table: {rankedIn_col_players_table}")
+
+                        # Create mapping from team_league_df for rankedIn_id -> team_id and number_team_ids
+                        team_mapping = {}
+
+                        if 'rankedIn_id' in team_league_df.columns and 'team_id' in team_league_df.columns:
+                            # Group by rankedIn_id and get first team_id and number_team_ids for each
+                            for rankedIn_id, group in team_league_df.groupby('rankedIn_id'):
+                                team_id = group['team_id'].iloc[0] if not pd.isna(group['team_id'].iloc[0]) else ''
+                                number_team_ids = group['number_team_ids'].iloc[0] if 'number_team_ids' in group.columns else 0
+                                team_mapping[str(rankedIn_id)] = {
+                                    'team_id': team_id,
+                                    'number_team_ids': number_team_ids
+                                }
+
+                        # Add or update team_id and number_team_ids columns in players_table_df
+                        players_table_df['team_id'] = ''
+                        players_table_df['number_team_ids'] = 0
+
+                        # Update values based on rankedIn_id mapping
+                        for idx, row in players_table_df.iterrows():
+                            rankedIn_id_value = str(row[rankedIn_col_players_table]) if pd.notna(row[rankedIn_col_players_table]) else ''
+
+                            if rankedIn_id_value in team_mapping:
+                                players_table_df.at[idx, 'team_id'] = team_mapping[rankedIn_id_value]['team_id']
+                                players_table_df.at[idx, 'number_team_ids'] = team_mapping[rankedIn_id_value]['number_team_ids']
+                            else:
+                                players_table_df.at[idx, 'team_id'] = ''
+                                players_table_df.at[idx, 'number_team_ids'] = 0
+
+                        # Update the players_table sheet with the modified data
+                        players_table_data_formatted = format_dataframe_for_sheets(players_table_df)
+                        format_worksheet(players_table_sheet, players_table_data_formatted)
+                        await asyncio.sleep(1)
+
+                        logger.info(f"Updated players_table sheet with team_id and number_team_ids columns")
+                        logger.info(f"Players table now has {len(players_table_df)} rows and columns: {list(players_table_df.columns)}")
+                    else:
+                        if rankedIn_col_players_table is None:
+                            logger.warning("No rankedIn_id column found in players_table sheet")
+                        if team_league_df is None:
+                            logger.warning("No team_league data available for comparison")
+                else:
+                    logger.info("players_table sheet exists but is empty")
+
+            except gspread.WorksheetNotFound:
+                logger.info("players_table sheet not found - skipping team_id update")
+            except Exception as e:
+                logger.error(f"Error processing players_table sheet: {str(e)}")
 
         # Share spreadsheet if email provided
         if client_email:
