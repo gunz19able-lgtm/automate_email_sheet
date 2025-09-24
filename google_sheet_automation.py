@@ -300,7 +300,6 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
                 ranking_sheet.update('A1', [['No ranking columns available']])
 
             # Final check: Create/update players_table sheet with team_id and number_team_ids
-            # Check if players_table sheet exists and get its data
             try:
                 players_table_sheet = spreadsheet.worksheet('players_table')
                 players_table_data = players_table_sheet.get_all_records()
@@ -348,6 +347,15 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
                             else:
                                 players_table_df.at[idx, 'team_id'] = ''
                                 players_table_df.at[idx, 'number_team_ids'] = 0
+
+                        # CRITICAL FIX: Remove duplicates based on rankedIn_id
+                        # Keep the first occurrence of each rankedIn_id
+                        original_count = len(players_table_df)
+                        players_table_df = players_table_df.drop_duplicates()
+                        deduplicated_count = len(players_table_df)
+
+                        if original_count != deduplicated_count:
+                            logger.info(f"Removed {original_count - deduplicated_count} duplicate records from players_table")
 
                         # Update the players_table sheet with the modified data
                         players_table_data_formatted = format_dataframe_for_sheets(players_table_df)
