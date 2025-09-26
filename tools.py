@@ -62,26 +62,35 @@ async def make_requests(url, headers):
                 impersonate_os='windows',
             ) as client:
                 response = await client.get(url, headers=headers)
-
-                if response.status_code == 200:
-                    return response  # Only return on success
+                if response.status_code == 200 and response.content:
+                    try:
+                        json_data = response.json()
+                        if json_data is not None:
+                            return response
+                        else:
+                            logger.info(f"Attempt {attempt + 1}: Response JSON is None")
+                    except Exception as json_error:
+                        logger.info(f"Attempt {attempt + 1}: JSON parsing failed: {str(json_error)}")
                 else:
                     logger.info(f"Attempt {attempt + 1}: Status code {response.status_code}")
-                    if attempt < 4:  # Don't sleep after the last attempt
-                        # Exponential backoff: 2^attempt + random jitter
-                        delay = (2 ** attempt) + random_delay
-                        await asyncio.sleep(delay)
-                    continue  # Retry on non-200 status codes
+
+                # If we get here, we need to retry
+                if attempt < 4:  # Don't sleep after the last attempt
+                    # Exponential backoff: 2^attempt + random jitter
+                    delay = (2 ** attempt) + random_delay
+                    logger.info(f"Retrying in {delay:.1f} seconds...")
+                    await asyncio.sleep(delay)
 
         except Exception as e:
             logger.info(f"Attempt {attempt + 1} failed: {str(e)}")
             if attempt < 4:
                 # Exponential backoff: 2^attempt + random jitter
                 delay = (2 ** attempt) + random_delay
+                logger.info(f"Retrying in {delay:.1f} seconds...")
                 await asyncio.sleep(delay)
-            continue
 
-    return "Failed after 5 attempts"  # Only return string after all attempts fail
+    logger.error(f"Failed to get valid response from {url} after 5 attempts")
+    return None  # Return None instead of string for easier checking
 
 
 async def auto_adjust_column_width(worksheet, dataframe):
