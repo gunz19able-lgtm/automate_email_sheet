@@ -732,7 +732,8 @@ async def get_player_image_url(rankedin_id):
         return ""
 
 
-async def get_players(team_id, max_concurrent_rankings=3, delay_between_batches=5):
+async def get_players(team_id, max_concurrent_rankings=3, delay_between_batches=5, max_retries=15):
+    random_delay = await random_interval(20)
     """
     Get players data with limited concurrency for ranking position requests
 
@@ -740,107 +741,149 @@ async def get_players(team_id, max_concurrent_rankings=3, delay_between_batches=
         season_id: The season ID to get players for
         max_concurrent_rankings: Max concurrent ranking requests (default: 5)
         delay_between_batches: Delay between ranking batches in seconds (default: 1)
+        max_retries: Maximum number of retries for the entire function (default: 5)
     """
-    headers = {
-        f'User-Agent': await random_useragent(),
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Referer': 'https://rankedin.com/en/team/homepage/1764246',
-        'Sec-Fetch-Dest': 'empty',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'same-origin',
-        'Connection': 'keep-alive',
-        'Cookie': 'ai_user=DFzEjMtcUnEUDoZhTMKlbQ^|2025-08-11T18:49:59.686Z; __stripe_mid=6d617d98-f9ca-4fb0-b4f7-dfc799d68f5a760a87; modal-ads={%22_playerId%22:null%2C%22_ads%22:[{%22_id%22:9%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:10%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:4%2C%22_lastAdDate%22:%222025-08-11%22}]}; ARRAffinity=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; ARRAffinitySameSite=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; language=en',
-    }
-    url = f"https://api.rankedin.com/v1/TeamLeague/GetTeamLeagueTeamHomepageAsync?teamId={team_id}&language=en"
-    random_delay = await random_interval(delay_between_batches)
 
-    try:
-        response = await make_requests(url, headers=headers)
-        raw_datas = response.json()
-        team_club_id = raw_datas['Team']['HomeClub']['Id']
-        players_lists = raw_datas['Team']['Players']
-        players_listings_dicts = []
-
-        # Extract player IDs for ranking position lookup
-        player_ids = [player_data['Id'] for player_data in players_lists]
-
-        # Get ranking positions with limited concurrency
-        ranking_map = {}
-        timestamp_map = {}
-        ranking_name_map = {}
-
-        if player_ids:
-            logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {team_id} with max {max_concurrent_rankings} concurrent...")
-
-            # Process ranking requests in batches
-            for i in range(0, len(player_ids), max_concurrent_rankings):
-                batch_ids = player_ids[i:i + max_concurrent_rankings]
-                logger.info(f"Processing ranking batch {i//max_concurrent_rankings + 1} with {len(batch_ids)} players...")
-
-                # Create tasks for this batch
-                ranking_tasks = [get_ranking_position_of_players(player_id) for player_id in batch_ids]
-                ranking_results = await asyncio.gather(*ranking_tasks, return_exceptions=True)
-
-                # Process results for this batch
-                for j, result in enumerate(ranking_results):
-                    player_id = batch_ids[j]
-                    if isinstance(result, Exception):
-                        logger.error(f"Error getting ranking for player {player_id}: {result}")
-                        ranking_map[player_id] = ""
-                        timestamp_map[player_id] = ""
-                        ranking_name_map[player_id] = ""
-                    else:
-                        # Unpack the tuple returned from get_ranking_position_of_players
-                        standing, timestamp, ranking_name = result
-                        ranking_map[player_id] = standing if standing is not None else ""
-                        timestamp_map[player_id] = timestamp if timestamp is not None else ""
-                        ranking_name_map[player_id] = ranking_name if ranking_name is not None else ""
-
-                # Add delay between batches (except for last batch)
-                if i + max_concurrent_rankings < len(player_ids):
-                    await asyncio.sleep(random_delay)
-                    logger.info(f"Ranking batch complete, waiting {int(random_delay)}s before next batch...")
-
-        # Build player data with ranking positions, timestamps, and ranking names
-        for idx in range(len(players_lists)):
-            player_datas = players_lists[idx]
-            player_id = player_datas['Id']
-
-            datas = {
-                'Team_ID_Players': team_id,
-                'Pool ID': raw_datas['PoolId'],
-                'Team League ID': raw_datas['TeamLeagueId'],
-                'Team League Name': raw_datas['TeamLeagueName'],
-                'State Message': raw_datas['StateMessage'],
-                'Player ID': player_id,
-                'Ranking Position': ranking_map.get(player_id, ""),
-                'Ranking Timestamp': timestamp_map.get(player_id, ""),
-                'Ranking Name': ranking_name_map.get(player_id, ""),
-                'RankedInId': player_datas['RankedinId'],
-                'Name': player_datas['FirstName'],
-                'Player Order': player_datas['PlayerOrder'],
-                'Player Rating': player_datas['RatingBegin'],
-                'Team Participant Type': player_datas['TeamParticipantType'],
-                'Has License': player_datas['HasLicense'],
-                'Player URL': f"https://rankedin.com{player_datas['PlayerUrl']}",
-                'Team Organisation Id': team_club_id,
-                'Players Home Club Id': player_datas['HomeClub']['Id'],
-                'Home Club Name': player_datas['HomeClub']['Name'],
-                'Home Club Country': player_datas['HomeClub']['CountryShort'],
-                'Home Club City': player_datas['HomeClub']['City'],
-                'Home Club URL': f"https://rankedin.com{player_datas['HomeClub']['Url']}",
-                'Ranking API URL': f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={player_id}",
+    for attempt in range(max_retries):
+        try:
+            headers = {
+                f'User-Agent': await random_useragent(),
+                'Accept': 'application/json, text/plain, */*',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Referer': 'https://rankedin.com/en/team/homepage/1764246',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin',
+                'Connection': 'keep-alive',
+                'Cookie': 'ai_user=DFzEjMtcUnEUDoZhTMKlbQ^|2025-08-11T18:49:59.686Z; __stripe_mid=6d617d98-f9ca-4fb0-b4f7-dfc799d68f5a760a87; modal-ads={%22_playerId%22:null%2C%22_ads%22:[{%22_id%22:9%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:10%2C%22_lastAdDate%22:%220001-01-01%22}%2C{%22_id%22:4%2C%22_lastAdDate%22:%222025-08-11%22}]}; ARRAffinity=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; ARRAffinitySameSite=bc076499a11c91231753e64e9765ff1ed1ccf1250ac8779f29466c4ddab3cf22; language=en',
             }
+            url = f"https://api.rankedin.com/v1/TeamLeague/GetTeamLeagueTeamHomepageAsync?teamId={team_id}&language=en"
 
-            players_listings_dicts.append(datas)
+            response = await make_requests(url, headers=headers)
 
-        logger.info(f"Successfully collected {len(players_listings_dicts)} players for season {team_id}")
-        return players_listings_dicts
+            # Check if make_requests failed completely
+            if response is None:
+                logger.warning(f"Attempt {attempt + 1}: Failed to get response for team {team_id}")
+                raise Exception("No response received from make_requests")
 
-    except Exception as e:
-        logger.error(f"Error getting players for team {team_id}: {str(e)}")
-        return []
+            raw_datas = response.json()
+
+            # Validate response structure
+            if not raw_datas:
+                logger.warning(f"Attempt {attempt + 1}: Empty response for team {team_id}")
+                raise Exception("Empty response data")
+
+            if not isinstance(raw_datas, dict):
+                logger.warning(f"Attempt {attempt + 1}: Response is not a dictionary for team {team_id}")
+                raise Exception("Response data is not a dictionary")
+
+            if 'Team' not in raw_datas or raw_datas['Team'] is None:
+                logger.warning(f"Attempt {attempt + 1}: Missing or None 'Team' key for team {team_id}")
+                raise Exception("Invalid response structure: missing 'Team' key")
+
+            if 'Players' not in raw_datas['Team'] or raw_datas['Team']['Players'] is None:
+                logger.warning(f"Attempt {attempt + 1}: Missing or None 'Players' key for team {team_id}")
+                raise Exception("Invalid response structure: missing 'Players' key in Team")
+
+            if 'HomeClub' not in raw_datas['Team'] or raw_datas['Team']['HomeClub'] is None:
+                logger.warning(f"Attempt {attempt + 1}: Missing or None 'HomeClub' key for team {team_id}")
+                raise Exception("Invalid response structure: missing 'HomeClub' key in Team")
+
+            # If we reach here, the response structure is valid
+            team_club_id = raw_datas['Team']['HomeClub']['Id']
+            players_lists = raw_datas['Team']['Players']
+            players_listings_dicts = []
+            random_delay = await random_interval(delay_between_batches)
+
+            # Extract player IDs for ranking position lookup
+            player_ids = [player_data['Id'] for player_data in players_lists]
+
+            # Get ranking positions with limited concurrency
+            ranking_map = {}
+            timestamp_map = {}
+            ranking_name_map = {}
+
+            if player_ids:
+                logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {team_id} with max {max_concurrent_rankings} concurrent...")
+
+                # Process ranking requests in batches
+                for i in range(0, len(player_ids), max_concurrent_rankings):
+                    batch_ids = player_ids[i:i + max_concurrent_rankings]
+                    logger.info(f"Processing ranking batch {i//max_concurrent_rankings + 1} with {len(batch_ids)} players...")
+
+                    # Create tasks for this batch
+                    ranking_tasks = [get_ranking_position_of_players(player_id) for player_id in batch_ids]
+                    ranking_results = await asyncio.gather(*ranking_tasks, return_exceptions=True)
+
+                    # Process results for this batch
+                    for j, result in enumerate(ranking_results):
+                        player_id = batch_ids[j]
+                        if isinstance(result, Exception):
+                            logger.error(f"Error getting ranking for player {player_id}: {result}")
+                            ranking_map[player_id] = ""
+                            timestamp_map[player_id] = ""
+                            ranking_name_map[player_id] = ""
+                        else:
+                            # Unpack the tuple returned from get_ranking_position_of_players
+                            standing, timestamp, ranking_name = result
+                            ranking_map[player_id] = standing if standing is not None else ""
+                            timestamp_map[player_id] = timestamp if timestamp is not None else ""
+                            ranking_name_map[player_id] = ranking_name if ranking_name is not None else ""
+
+                    # Add delay between batches (except for last batch)
+                    if i + max_concurrent_rankings < len(player_ids):
+                        await asyncio.sleep(random_delay)
+                        logger.info(f"Ranking batch complete, waiting {int(random_delay)}s before next batch...")
+
+            # Build player data with ranking positions, timestamps, and ranking names
+            for idx in range(len(players_lists)):
+                player_datas = players_lists[idx]
+                player_id = player_datas['Id']
+
+                datas = {
+                    'Team_ID_Players': team_id,
+                    'Pool ID': raw_datas['PoolId'],
+                    'Team League ID': raw_datas['TeamLeagueId'],
+                    'Team League Name': raw_datas['TeamLeagueName'],
+                    'State Message': raw_datas['StateMessage'],
+                    'Player ID': player_id,
+                    'Ranking Position': ranking_map.get(player_id, ""),
+                    'Ranking Timestamp': timestamp_map.get(player_id, ""),
+                    'Ranking Name': ranking_name_map.get(player_id, ""),
+                    'RankedInId': player_datas['RankedinId'],
+                    'Name': player_datas['FirstName'],
+                    'Player Order': player_datas['PlayerOrder'],
+                    'Player Rating': player_datas['RatingBegin'],
+                    'Team Participant Type': player_datas['TeamParticipantType'],
+                    'Has License': player_datas['HasLicense'],
+                    'Player URL': f"https://rankedin.com{player_datas['PlayerUrl']}",
+                    'Team Organisation Id': team_club_id,
+                    'Players Home Club Id': player_datas['HomeClub']['Id'],
+                    'Home Club Name': player_datas['HomeClub']['Name'],
+                    'Home Club Country': player_datas['HomeClub']['CountryShort'],
+                    'Home Club City': player_datas['HomeClub']['City'],
+                    'Home Club URL': f"https://rankedin.com{player_datas['HomeClub']['Url']}",
+                    'Ranking API URL': f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={player_id}",
+                }
+
+                players_listings_dicts.append(datas)
+
+            logger.info(f"Successfully collected {len(players_listings_dicts)} players for season {team_id}")
+            return players_listings_dicts
+
+        except Exception as e:
+            logger.warning(f"Attempt {attempt + 1} failed for team {team_id}: {str(e)}")
+
+            # If this is not the last attempt, wait and retry
+            if attempt < max_retries - 1:
+                retry_delay = (2 ** attempt) + random_delay  # Exponential backoff
+                logger.info(f"Retrying team {team_id} in {retry_delay:.1f} seconds... (attempt {attempt + 2}/{max_retries})")
+                await asyncio.sleep(retry_delay)
+            else:
+                logger.error(f"All {max_retries} attempts failed for team {team_id}. Final error: {str(e)}")
+
+    # If all retries failed
+    return []
 
 
 async def collect_data_concurrently(season_id_home, season_id_away, match_ids, max_concurrent=3, delay_between_batches=5):
@@ -1406,98 +1449,75 @@ async def save_batch_to_excel(batch_data: Dict):
         else:
             return matches_df
 
-    def remove_empty_duplicate_rows(matches_df):
-        """
-        Remove empty/placeholder rows that were created during expansion.
-        Only removes rows that have no meaningful data (only key columns filled).
-        Preserves all rows with actual player data or match information.
-        Also preserves rows that have Team_ID information even if other data is empty.
-        """
-        if matches_df.empty:
-            return matches_df
+    def remove_empty_duplicate_rows(df):
+            """
+            Remove empty/placeholder rows that were created during expansion.
+            Removes rows that only have basic identifier columns filled but no actual match data.
+            Only preserves rows that have meaningful match/player data beyond the basic identifiers.
+            """
+            if df.empty:
+                return df
 
-        logger.info(f"Starting empty row removal with {len(matches_df)} rows")
+            initial_count = len(df)
+            logger.info(f"Starting empty row removal with {initial_count} rows")
 
-        # Check if Round_ID column exists
-        if 'Round_ID' not in matches_df.columns:
-            logger.warning("Round_ID column not found for empty row removal")
-            return matches_df
+            # Find the correct column names for Team IDs (handle different naming variations)
+            team_home_col = None
+            team_away_col = None
 
-        # Find the correct column names for Team IDs (handle different naming variations)
-        team_home_col = None
-        team_away_col = None
+            possible_home_names = ['Team_Home_ID_Matches', 'Team_ID_Home_Matches', 'Team_Home_ID', 'Home_Team_ID']
+            possible_away_names = ['Team_Away_ID_Matches', 'Team_ID_Away_Matches', 'Team_Away_ID', 'Away_Team_ID']
 
-        possible_home_names = ['Team_Home_ID_Matches', 'Team_ID_Home_Matches', 'Team_Home_ID', 'Home_Team_ID']
-        possible_away_names = ['Team_Away_ID_Matches', 'Team_ID_Away_Matches', 'Team_Away_ID', 'Away_Team_ID']
+            for col in df.columns:
+                if col in possible_home_names:
+                    team_home_col = col
+                if col in possible_away_names:
+                    team_away_col = col
 
-        for col in matches_df.columns:
-            if col in possible_home_names:
-                team_home_col = col
-            if col in possible_away_names:
-                team_away_col = col
+            # Define basic identifier columns that don't count as "meaningful data"
+            basic_identifier_columns = ['season_id', 'pool_id', 'Round_ID']
+            if team_home_col:
+                basic_identifier_columns.append(team_home_col)
+            if team_away_col:
+                basic_identifier_columns.append(team_away_col)
 
-        # Define key columns that should always have values (identifier columns)
-        key_columns = ['season_id', 'pool_id', 'Round_ID']
+            # Define data columns that indicate this is a real match row with actual data
+            meaningful_data_columns = []
+            for col in df.columns:
+                if col not in basic_identifier_columns:
+                    meaningful_data_columns.append(col)
 
-        # Define team ID columns that indicate this is a valid match row
-        team_id_columns = []
-        if team_home_col:
-            team_id_columns.append(team_home_col)
-        if team_away_col:
-            team_id_columns.append(team_away_col)
+            logger.info(f"Basic identifier columns: {basic_identifier_columns}")
+            logger.info(f"Meaningful data columns to check: {len(meaningful_data_columns)} columns")
 
-        # Define data columns that indicate this is a real match row (not empty placeholder)
-        data_columns = []
-        for col in matches_df.columns:
-            if col not in key_columns and col not in team_id_columns and any(keyword in col.lower() for keyword in
-                ['player', 'team', 'score', 'match', 'set', 'game', 'win', 'loss', 'point', 'name']):
-                data_columns.append(col)
+            # Identify rows to keep: only rows that have meaningful data beyond basic identifiers
+            rows_to_keep = []
+            empty_rows_removed = 0
 
-        # If no data columns found, use all non-key columns (excluding team ID columns)
-        if not data_columns:
-            data_columns = [col for col in matches_df.columns if col not in key_columns and col not in team_id_columns]
+            for idx, row in df.iterrows():
+                # Check if this row has any meaningful data beyond basic identifiers
+                has_meaningful_data = False
 
-        logger.info(f"Key columns: {key_columns}")
-        logger.info(f"Team ID columns: {team_id_columns}")
-        logger.info(f"Data columns to check: {len(data_columns)} columns")
+                # Check meaningful data columns for actual content
+                for col in meaningful_data_columns:
+                    value = row[col]
+                    if pd.notna(value) and str(value).strip() != '':
+                        has_meaningful_data = True
+                        break
 
-        # Identify rows to keep: rows that have meaningful data in data columns OR have team ID information
-        rows_to_keep = []
-        empty_rows_removed = 0
+                if has_meaningful_data:
+                    rows_to_keep.append(idx)
+                else:
+                    empty_rows_removed += 1
+                    logger.debug(f"Removing row with only basic identifiers - Round_ID: {row.get('Round_ID', 'Unknown')}")
 
-        for idx, row in matches_df.iterrows():
-            # Check if this row has any meaningful data in data columns
-            has_data = False
+            # Keep only rows with meaningful data beyond basic identifiers
+            df_cleaned = df.loc[rows_to_keep].copy()
 
-            # First check data columns
-            for col in data_columns:
-                value = row[col]
-                if pd.notna(value) and str(value).strip() != '':
-                    has_data = True
-                    break
+            final_count = len(df_cleaned)
+            logger.info(f"Removed {empty_rows_removed} rows with only basic identifiers, {final_count} rows remaining")
 
-            # If no data found, check if it has team ID information (which we want to preserve)
-            if not has_data:
-                for col in team_id_columns:
-                    if col in row.index:
-                        value = row[col]
-                        if pd.notna(value) and str(value).strip() != '':
-                            has_data = True
-                            break
-
-            if has_data:
-                rows_to_keep.append(idx)
-            else:
-                empty_rows_removed += 1
-                logger.debug(f"Removing empty row with Round_ID: {row.get('Round_ID', 'Unknown')}")
-
-        # Keep only rows with actual data or team ID information
-        df_cleaned = matches_df.loc[rows_to_keep].copy()
-
-        final_count = len(df_cleaned)
-        logger.info(f"Removed {empty_rows_removed} empty placeholder rows, {final_count} rows remaining")
-
-        return df_cleaned.reset_index(drop=True)
+            return df_cleaned.reset_index(drop=True)
 
     try:
         with pd.ExcelWriter(f"{output_name}", engine='openpyxl') as writer:
