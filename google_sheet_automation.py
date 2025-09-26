@@ -121,6 +121,8 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
                 for value in row:
                     if pd.isna(value):
                         row_data.append('')
+                    elif isinstance(value, (int, float)) and value == 0:
+                        row_data.append('0')  # Ensure 0 is stored as plain text
                     else:
                         row_data.append(str(value))
                 data_rows.append(row_data)
@@ -143,14 +145,22 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
 
             # Clear and update data
             worksheet.clear()
-            worksheet.update('A1', data)
+            worksheet.update('A1', data, value_input_option='RAW')  # Use RAW to prevent formatting
 
-            # Format headers (gray background and bold)
+            # Format headers (gray background and bold) but avoid underlining
             header_range = f'A1:{column_number_to_letter(len(data[0]))}1'
             worksheet.format(header_range, {
-                'textFormat': {'bold': True},
+                'textFormat': {'bold': True, 'underline': False},  # Explicitly disable underline
                 'backgroundColor': {'red': 0.9, 'green': 0.9, 'blue': 0.9}
             })
+
+            # Clear any formatting from data rows to remove underlining
+            if len(data) > 1:
+                data_range = f'A2:{column_number_to_letter(len(data[0]))}{len(data)}'
+                worksheet.format(data_range, {
+                    'textFormat': {'underline': False, 'bold': False},  # Clear formatting
+                    'backgroundColor': {'red': 1.0, 'green': 1.0, 'blue': 1.0}  # White background
+                })
 
             # Freeze header row
             worksheet.freeze(rows=1)
@@ -203,20 +213,31 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
             if team_league_df_data:
                 team_league_df = pd.DataFrame(team_league_df_data)
 
-                # Add number_team_ids column
-                # Count how many times each rankedIn_id appears associated with team_id
+                # FIXED: Add number_team_ids column with correct logic
                 if 'rankedIn_id' in team_league_df.columns and 'team_id' in team_league_df.columns:
-                    # Create a count mapping for rankedIn_id occurrences
-                    rankedIn_id_counts = team_league_df['rankedIn_id'].value_counts().to_dict()
+                    # Create team_ids column with comma-separated values and count unique team_ids
+                    team_ids_mapping = {}
+                    number_team_ids_mapping = {}
 
-                    # Add the count column
-                    team_league_df['number_team_ids'] = team_league_df['rankedIn_id'].map(rankedIn_id_counts)
+                    for rankedIn_id, group in team_league_df.groupby('rankedIn_id'):
+                        # Get unique team_ids for this rankedIn_id (excluding NaN and empty values)
+                        unique_team_ids = group['team_id'].dropna().unique()
+                        unique_team_ids_str = [str(tid) for tid in unique_team_ids if pd.notna(tid) and str(tid).strip()]
 
-                    # Handle any NaN values that might occur from mapping
-                    team_league_df['number_team_ids'] = team_league_df['number_team_ids'].fillna(0).astype(int)
+                        # Store the comma-separated team_ids and the count
+                        team_ids_mapping[rankedIn_id] = ', '.join(unique_team_ids_str)
+                        number_team_ids_mapping[rankedIn_id] = len(unique_team_ids_str)
+
+                    # Add the team_ids and number_team_ids columns
+                    team_league_df['team_ids'] = team_league_df['rankedIn_id'].map(team_ids_mapping).fillna('')
+                    team_league_df['number_team_ids'] = team_league_df['rankedIn_id'].map(number_team_ids_mapping).fillna(0).astype(int)
+
+                    # Remove the original team_id column
+                    team_league_df = team_league_df.drop('team_id', axis=1)
                 else:
-                    # If required columns don't exist, add a column with 0s
+                    # If required columns don't exist, add columns with default values
                     team_league_df['number_team_ids'] = 0
+                    team_league_df['team_ids'] = ''
 
                 team_league_sheet = create_or_get_worksheet(spreadsheet, 'team_league')
                 team_league_data = format_dataframe_for_sheets(team_league_df)
@@ -285,21 +306,21 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
                         # Create empty sheet
                         ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
                         ranking_sheet.clear()
-                        ranking_sheet.update('A1', [['No ranking columns found']])
+                        ranking_sheet.update('A1', [['No ranking columns found']], value_input_option='RAW')
                 else:
                     ranking_count = 0
                     # Create empty sheet
                     ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
                     ranking_sheet.clear()
-                    ranking_sheet.update('A1', [['No players with ranking data found']])
+                    ranking_sheet.update('A1', [['No players with ranking data found']], value_input_option='RAW')
             else:
                 ranking_count = 0
                 # Create empty sheet
                 ranking_sheet = create_or_get_worksheet(spreadsheet, 'ranking_position_men_db')
                 ranking_sheet.clear()
-                ranking_sheet.update('A1', [['No ranking columns available']])
+                ranking_sheet.update('A1', [['No ranking columns available']], value_input_option='RAW')
 
-            # Final check: Create/update players_table sheet with team_id and number_team_ids
+            # Final check: Create/update players_table sheet with team_ids and number_team_ids
             try:
                 players_table_sheet = spreadsheet.worksheet('players_table')
                 players_table_data = players_table_sheet.get_all_records()
@@ -320,36 +341,39 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
                     if rankedIn_col_players_table and team_league_df is not None:
                         logger.info(f"Found rankedIn_id column in players_table: {rankedIn_col_players_table}")
 
-                        # Create mapping from team_league_df for rankedIn_id -> team_id and number_team_ids
+                        # Create mapping from team_league_df for rankedIn_id -> team_ids and number_team_ids
                         team_mapping = {}
 
-                        if 'rankedIn_id' in team_league_df.columns and 'team_id' in team_league_df.columns:
-                            # Group by rankedIn_id and get first team_id and number_team_ids for each
+                        if 'rankedIn_id' in team_league_df.columns and 'team_ids' in team_league_df.columns:
+                            # Group by rankedIn_id and get team_ids and number_team_ids for each
                             for rankedIn_id, group in team_league_df.groupby('rankedIn_id'):
-                                team_id = group['team_id'].iloc[0] if not pd.isna(group['team_id'].iloc[0]) else ''
+                                team_ids = group['team_ids'].iloc[0] if not pd.isna(group['team_ids'].iloc[0]) else ''
                                 number_team_ids = group['number_team_ids'].iloc[0] if 'number_team_ids' in group.columns else 0
                                 team_mapping[str(rankedIn_id)] = {
-                                    'team_id': team_id,
+                                    'team_ids': team_ids,
                                     'number_team_ids': number_team_ids
                                 }
 
-                        # Add or update team_id and number_team_ids columns in players_table_df
-                        players_table_df['team_id'] = ''
+                        # Add or update team_ids and number_team_ids columns in players_table_df
+                        players_table_df['team_ids'] = ''
                         players_table_df['number_team_ids'] = 0
+
+                        # Remove old team_id column if it exists
+                        if 'team_id' in players_table_df.columns:
+                            players_table_df = players_table_df.drop('team_id', axis=1)
 
                         # Update values based on rankedIn_id mapping
                         for idx, row in players_table_df.iterrows():
                             rankedIn_id_value = str(row[rankedIn_col_players_table]) if pd.notna(row[rankedIn_col_players_table]) else ''
 
                             if rankedIn_id_value in team_mapping:
-                                players_table_df.at[idx, 'team_id'] = team_mapping[rankedIn_id_value]['team_id']
+                                players_table_df.at[idx, 'team_ids'] = team_mapping[rankedIn_id_value]['team_ids']
                                 players_table_df.at[idx, 'number_team_ids'] = team_mapping[rankedIn_id_value]['number_team_ids']
                             else:
-                                players_table_df.at[idx, 'team_id'] = ''
+                                players_table_df.at[idx, 'team_ids'] = ''
                                 players_table_df.at[idx, 'number_team_ids'] = 0
 
-                        # CRITICAL FIX: Remove duplicates based on rankedIn_id
-                        # Keep the first occurrence of each rankedIn_id
+                        # Remove duplicates based on all columns
                         original_count = len(players_table_df)
                         players_table_df = players_table_df.drop_duplicates()
                         deduplicated_count = len(players_table_df)
@@ -362,7 +386,7 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
                         format_worksheet(players_table_sheet, players_table_data_formatted)
                         await asyncio.sleep(1)
 
-                        logger.info(f"Updated players_table sheet with team_id and number_team_ids columns")
+                        logger.info(f"Updated players_table sheet with team_ids and number_team_ids columns")
                         logger.info(f"Players table now has {len(players_table_df)} rows and columns: {list(players_table_df.columns)}")
                     else:
                         if rankedIn_col_players_table is None:
@@ -373,7 +397,7 @@ async def save_players_to_google_sheets(players_result: Dict, client_email: str 
                     logger.info("players_table sheet exists but is empty")
 
             except gspread.WorksheetNotFound:
-                logger.info("players_table sheet not found - skipping team_id update")
+                logger.info("players_table sheet not found - skipping team_ids update")
             except Exception as e:
                 logger.error(f"Error processing players_table sheet: {str(e)}")
 
@@ -708,9 +732,8 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
         def remove_empty_rows(df):
             """
             Remove empty/placeholder rows that were created during expansion.
-            Only removes rows that have no meaningful data (only key columns filled).
-            Preserves all rows with actual player data or match information.
-            Also preserves rows that have Team_ID information even if other data is empty.
+            Removes rows that only have basic identifier columns filled but no actual match data.
+            Only preserves rows that have meaningful match/player data beyond the basic identifiers.
             """
             if df.empty:
                 return df
@@ -731,66 +754,48 @@ async def save_batch_to_google_sheets(batch_data: Dict, client_email: str = None
                 if col in possible_away_names:
                     team_away_col = col
 
-            # Define key columns that should always have values (identifier columns)
-            key_columns = ['season_id', 'pool_id', 'Round_ID']
-
-            # Define team ID columns that indicate this is a valid match row
-            team_id_columns = []
+            # Define basic identifier columns that don't count as "meaningful data"
+            basic_identifier_columns = ['season_id', 'pool_id', 'Round_ID']
             if team_home_col:
-                team_id_columns.append(team_home_col)
+                basic_identifier_columns.append(team_home_col)
             if team_away_col:
-                team_id_columns.append(team_away_col)
+                basic_identifier_columns.append(team_away_col)
 
-            # Define data columns that indicate this is a real match row (not empty placeholder)
-            data_columns = []
+            # Define data columns that indicate this is a real match row with actual data
+            meaningful_data_columns = []
             for col in df.columns:
-                if col not in key_columns and col not in team_id_columns and any(keyword in col.lower() for keyword in
-                    ['player', 'team', 'score', 'match', 'set', 'game', 'win', 'loss', 'point', 'name']):
-                    data_columns.append(col)
+                if col not in basic_identifier_columns:
+                    meaningful_data_columns.append(col)
 
-            # If no data columns found, use all non-key columns (excluding team ID columns)
-            if not data_columns:
-                data_columns = [col for col in df.columns if col not in key_columns and col not in team_id_columns]
+            logger.info(f"Basic identifier columns: {basic_identifier_columns}")
+            logger.info(f"Meaningful data columns to check: {len(meaningful_data_columns)} columns")
 
-            logger.info(f"Key columns: {key_columns}")
-            logger.info(f"Team ID columns: {team_id_columns}")
-            logger.info(f"Data columns to check: {len(data_columns)} columns")
-
-            # Identify rows to keep: rows that have meaningful data in data columns OR have team ID information
+            # Identify rows to keep: only rows that have meaningful data beyond basic identifiers
             rows_to_keep = []
             empty_rows_removed = 0
 
             for idx, row in df.iterrows():
-                # Check if this row has any meaningful data in data columns
-                has_data = False
+                # Check if this row has any meaningful data beyond basic identifiers
+                has_meaningful_data = False
 
-                # First check data columns
-                for col in data_columns:
+                # Check meaningful data columns for actual content
+                for col in meaningful_data_columns:
                     value = row[col]
                     if pd.notna(value) and str(value).strip() != '':
-                        has_data = True
+                        has_meaningful_data = True
                         break
 
-                # If no data found, check if it has team ID information (which we want to preserve)
-                if not has_data:
-                    for col in team_id_columns:
-                        if col in row.index:
-                            value = row[col]
-                            if pd.notna(value) and str(value).strip() != '':
-                                has_data = True
-                                break
-
-                if has_data:
+                if has_meaningful_data:
                     rows_to_keep.append(idx)
                 else:
                     empty_rows_removed += 1
-                    logger.debug(f"Removing empty row with Round_ID: {row.get('Round_ID', 'Unknown')}")
+                    logger.debug(f"Removing row with only basic identifiers - Round_ID: {row.get('Round_ID', 'Unknown')}")
 
-            # Keep only rows with actual data or team ID information
+            # Keep only rows with meaningful data beyond basic identifiers
             df_cleaned = df.loc[rows_to_keep].copy()
 
             final_count = len(df_cleaned)
-            logger.info(f"Removed {empty_rows_removed} empty placeholder rows, {final_count} rows remaining")
+            logger.info(f"Removed {empty_rows_removed} rows with only basic identifiers, {final_count} rows remaining")
 
             return df_cleaned.reset_index(drop=True)
 
