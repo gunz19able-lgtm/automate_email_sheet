@@ -89,51 +89,101 @@ async def get_ranking_position_of_players(player_id):
 
     try:
         response = await make_requests(api_url, headers=headers)
-        ranking_position = response.json()
+
+        # Add validation for the response
+        if response is None:
+            logger.warning(f"No response received for player {player_id}")
+            return None, None, None
+
+        try:
+            ranking_position = response.json()
+        except Exception as json_error:
+            logger.warning(f"Failed to parse JSON for player {player_id}: {json_error}")
+            return None, None, None
+
+        # Validate the ranking_position structure
+        if ranking_position is None:
+            logger.warning(f"Ranking position data is None for player {player_id}")
+            return None, None, None
+
+        if not isinstance(ranking_position, (list, dict)):
+            logger.warning(f"Unexpected ranking position data type for player {player_id}: {type(ranking_position)}")
+            return None, None, None
+
+        # Handle case where ranking_position is empty
+        if isinstance(ranking_position, list) and len(ranking_position) == 0:
+            logger.warning(f"Empty ranking position data for player {player_id}")
+            return None, None, None
 
         latest_timestamp = 0
         latest_standing = None
         latest_ranking_name = None
 
         # Iterate through each ranking list
-        for idx in range(len(ranking_position)):
-            ranking_list = ranking_position[idx]
+        try:
+            # Handle both list and dict responses
+            if isinstance(ranking_position, dict):
+                # If it's a dict, convert to list format or handle appropriately
+                ranking_position = [ranking_position]
 
-            if isinstance(ranking_list, list):
-                # Process all entries in this ranking list
-                for entry in ranking_list:
-                    if isinstance(entry, dict) and 'UnixTimestamp' in entry and 'Standing' in entry:
-                        unix_timestamp = entry['UnixTimestamp']
-                        standing = entry['Standing']
+            for idx in range(len(ranking_position)):
+                ranking_list = ranking_position[idx]
 
-                        # Check for ranking name in the entry
-                        entry_ranking_name = entry.get('RankingName', f"Ranking_{idx}")
+                if isinstance(ranking_list, list):
+                    # Process all entries in this ranking list
+                    for entry in ranking_list:
+                        if isinstance(entry, dict) and 'UnixTimestamp' in entry and 'Standing' in entry:
+                            unix_timestamp = entry['UnixTimestamp']
+                            standing = entry['Standing']
 
-                        # Only process if it's the target ranking name or contains the target name
+                            # Check for ranking name in the entry
+                            entry_ranking_name = entry.get('RankingName', f"Ranking_{idx}")
+
+                            # Only process if it's the target ranking name or contains the target name
+                            if (entry_ranking_name == target_ranking_name or
+                                target_ranking_name in str(entry_ranking_name)):
+
+                                # Keep track of the highest timestamp (latest/furthest date, could be in future)
+                                if unix_timestamp > latest_timestamp:
+                                    latest_timestamp = unix_timestamp
+                                    latest_standing = standing
+                                    latest_ranking_name = entry_ranking_name
+                elif isinstance(ranking_list, dict):
+                    # Handle case where ranking_list is a dict instead of a list
+                    if 'UnixTimestamp' in ranking_list and 'Standing' in ranking_list:
+                        unix_timestamp = ranking_list['UnixTimestamp']
+                        standing = ranking_list['Standing']
+                        entry_ranking_name = ranking_list.get('RankingName', f"Ranking_{idx}")
+
                         if (entry_ranking_name == target_ranking_name or
                             target_ranking_name in str(entry_ranking_name)):
 
-                            # Keep track of the highest timestamp (latest/furthest date, could be in future)
                             if unix_timestamp > latest_timestamp:
                                 latest_timestamp = unix_timestamp
                                 latest_standing = standing
                                 latest_ranking_name = entry_ranking_name
+                else:
+                    logger.warning(f"Unexpected ranking list type for player {player_id} at index {idx}: {type(ranking_list)}")
+
+        except Exception as processing_error:
+            logger.error(f"Error processing ranking data for player {player_id}: {processing_error}")
+            return None, None, None
 
         # Convert and display the latest (highest/furthest) timestamp
         if latest_timestamp > 0:
             latest_date = await convert_unix_timestamp(latest_timestamp)
-            logger.info(f"Ranking Name: {latest_ranking_name}")
-            logger.info(f"Latest timestamp: {latest_date}")
-            logger.info(f"Standing for latest timestamp: {latest_standing}")
+            logger.info(f"Player {player_id} - Ranking Name: {latest_ranking_name}")
+            logger.info(f"Player {player_id} - Latest timestamp: {latest_date}")
+            logger.info(f"Player {player_id} - Standing for latest timestamp: {latest_standing}")
 
             # Return standing, timestamp, and ranking name as a tuple
             return latest_standing, latest_date, latest_ranking_name
         else:
-            logger.info(f"No valid timestamps found for ranking: {target_ranking_name}")
+            logger.info(f"Player {player_id} - No valid timestamps found for ranking: {target_ranking_name}")
             return None, None, None
 
     except Exception as e:
-        logger.info(f"Error: {str(e)}")
+        logger.error(f"Error getting ranking for player {player_id}: {str(e)}")
         return None, None, None
 
 
@@ -179,7 +229,7 @@ async def get_players(season_id):
 
             # Run both sets of tasks concurrently
             logger.info("Fetching ranking positions and player images concurrently...")
-            ranking_results, image_results = await asyncio.gather(
+            ranking_results = await asyncio.gather(
                 asyncio.gather(*ranking_tasks, return_exceptions=True),
                 return_exceptions=True
             )
@@ -198,14 +248,6 @@ async def get_players(season_id):
                     timestamp_map[player_ids[i]] = timestamp if timestamp is not None else ""
                     ranking_name_map[player_ids[i]] = ranking_name if ranking_name is not None else ""
 
-            # Process image URL results
-            for i, result in enumerate(image_results):
-                if isinstance(result, Exception):
-                    logger.error(f"Error getting image for RankedInId {rankedin_ids[i]}: {result}")
-                    image_url_map[rankedin_ids[i]] = ""
-                else:
-                    image_url_map[rankedin_ids[i]] = result if result is not None else ""
-
         # Build player data with ranking positions, timestamps, ranking names, and image URLs
         for idx in range(len(players_lists)):
             player_datas = players_lists[idx]
@@ -223,7 +265,6 @@ async def get_players(season_id):
                 'Ranking Timestamp': timestamp_map.get(player_id, ""),
                 'Ranking Name': ranking_name_map.get(player_id, ""),
                 'RankedInId': rankedin_id,
-                'Player Image URL': image_url_map.get(rankedin_id, ""),  # Add image URL field
                 'Name': player_datas['FirstName'],
                 'Player Order': player_datas['PlayerOrder'],
                 'Player Rating': player_datas['RatingBegin'],
@@ -734,10 +775,10 @@ async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches
     Get players data with limited concurrency for ranking position requests
 
     Args:
-        season_id: The season ID to get players for
-        max_concurrent_rankings: Max concurrent ranking requests (default: 5)
-        delay_between_batches: Delay between ranking batches in seconds (default: 1)
-        max_retries: Maximum number of retries for the entire function (default: 5)
+        team_id: The team ID to get players for
+        max_concurrent_rankings: Max concurrent ranking requests (default: 10)
+        delay_between_batches: Delay between ranking batches in seconds (default: 5)
+        max_retries: Maximum number of retries for the entire function (default: 15)
     """
 
     for attempt in range(max_retries):
@@ -762,7 +803,12 @@ async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches
                 logger.warning(f"Attempt {attempt + 1}: Failed to get response for team {team_id}")
                 raise Exception("No response received from make_requests")
 
-            raw_datas = response.json()
+            # Parse JSON with error handling
+            try:
+                raw_datas = response.json()
+            except Exception as json_error:
+                logger.warning(f"Attempt {attempt + 1}: Failed to parse JSON for team {team_id}: {json_error}")
+                raise Exception(f"JSON parsing failed: {json_error}")
 
             # Validate response structure
             if not raw_datas:
@@ -773,26 +819,69 @@ async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches
                 logger.warning(f"Attempt {attempt + 1}: Response is not a dictionary for team {team_id}")
                 raise Exception("Response data is not a dictionary")
 
-            if 'Team' not in raw_datas or raw_datas['Team'] is None:
-                logger.warning(f"Attempt {attempt + 1}: Missing or None 'Team' key for team {team_id}")
+            # Check if 'Team' key exists and is not None
+            if 'Team' not in raw_datas:
+                logger.warning(f"Attempt {attempt + 1}: Missing 'Team' key for team {team_id}")
                 raise Exception("Invalid response structure: missing 'Team' key")
 
-            if 'Players' not in raw_datas['Team'] or raw_datas['Team']['Players'] is None:
-                logger.warning(f"Attempt {attempt + 1}: Missing or None 'Players' key for team {team_id}")
+            if raw_datas['Team'] is None:
+                logger.warning(f"Attempt {attempt + 1}: 'Team' key is None for team {team_id}")
+                raise Exception("Invalid response structure: 'Team' key is None")
+
+            team_data = raw_datas['Team']
+
+            # Validate Team structure
+            if not isinstance(team_data, dict):
+                logger.warning(f"Attempt {attempt + 1}: Team data is not a dictionary for team {team_id}")
+                raise Exception("Team data is not a dictionary")
+
+            # Check Players key
+            if 'Players' not in team_data:
+                logger.warning(f"Attempt {attempt + 1}: Missing 'Players' key in Team for team {team_id}")
                 raise Exception("Invalid response structure: missing 'Players' key in Team")
 
-            if 'HomeClub' not in raw_datas['Team'] or raw_datas['Team']['HomeClub'] is None:
-                logger.warning(f"Attempt {attempt + 1}: Missing or None 'HomeClub' key for team {team_id}")
+            if team_data['Players'] is None:
+                logger.warning(f"Attempt {attempt + 1}: 'Players' key is None in Team for team {team_id}")
+                raise Exception("Invalid response structure: 'Players' key in Team is None")
+
+            # Check HomeClub key
+            if 'HomeClub' not in team_data:
+                logger.warning(f"Attempt {attempt + 1}: Missing 'HomeClub' key in Team for team {team_id}")
                 raise Exception("Invalid response structure: missing 'HomeClub' key in Team")
 
+            if team_data['HomeClub'] is None:
+                logger.warning(f"Attempt {attempt + 1}: 'HomeClub' key is None in Team for team {team_id}")
+                raise Exception("Invalid response structure: 'HomeClub' key in Team is None")
+
+            # Validate HomeClub structure
+            home_club = team_data['HomeClub']
+            if not isinstance(home_club, dict):
+                logger.warning(f"Attempt {attempt + 1}: HomeClub data is not a dictionary for team {team_id}")
+                raise Exception("HomeClub data is not a dictionary")
+
+            if 'Id' not in home_club:
+                logger.warning(f"Attempt {attempt + 1}: Missing 'Id' key in HomeClub for team {team_id}")
+                raise Exception("Invalid response structure: missing 'Id' key in HomeClub")
+
             # If we reach here, the response structure is valid
-            team_club_id = raw_datas['Team']['HomeClub']['Id']
-            players_lists = raw_datas['Team']['Players']
+            team_club_id = home_club['Id']
+            players_lists = team_data['Players']
+
+            # Validate players list
+            if not isinstance(players_lists, list):
+                logger.warning(f"Attempt {attempt + 1}: Players data is not a list for team {team_id}")
+                raise Exception("Players data is not a list")
+
             players_listings_dicts = []
             random_delay = await random_interval(delay_between_batches)
 
-            # Extract player IDs for ranking position lookup
-            player_ids = [player_data['Id'] for player_data in players_lists]
+            # Extract player IDs for ranking position lookup with validation
+            player_ids = []
+            for player_data in players_lists:
+                if isinstance(player_data, dict) and 'Id' in player_data and player_data['Id'] is not None:
+                    player_ids.append(player_data['Id'])
+                else:
+                    logger.warning(f"Invalid player data structure found for team {team_id}")
 
             # Get ranking positions with limited concurrency
             ranking_map = {}
@@ -800,7 +889,7 @@ async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches
             ranking_name_map = {}
 
             if player_ids:
-                logger.info(f"Collecting ranking positions for {len(player_ids)} players in season {team_id} with max {max_concurrent_rankings} concurrent...")
+                logger.info(f"Collecting ranking positions for {len(player_ids)} players in team {team_id} with max {max_concurrent_rankings} concurrent...")
 
                 # Process ranking requests in batches
                 for i in range(0, len(player_ids), max_concurrent_rankings):
@@ -833,38 +922,71 @@ async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches
 
             # Build player data with ranking positions, timestamps, and ranking names
             for idx in range(len(players_lists)):
-                player_datas = players_lists[idx]
-                player_id = player_datas['Id']
+                try:
+                    player_datas = players_lists[idx]
 
-                datas = {
-                    'Team_ID_Players': team_id,
-                    'Pool ID': raw_datas['PoolId'],
-                    'Team League ID': raw_datas['TeamLeagueId'],
-                    'Team League Name': raw_datas['TeamLeagueName'],
-                    'State Message': raw_datas['StateMessage'],
-                    'Player ID': player_id,
-                    'Ranking Position': ranking_map.get(player_id, ""),
-                    'Ranking Timestamp': timestamp_map.get(player_id, ""),
-                    'Ranking Name': ranking_name_map.get(player_id, ""),
-                    'RankedInId': player_datas['RankedinId'],
-                    'Name': player_datas['FirstName'],
-                    'Player Order': player_datas['PlayerOrder'],
-                    'Player Rating': player_datas['RatingBegin'],
-                    'Team Participant Type': player_datas['TeamParticipantType'],
-                    'Has License': player_datas['HasLicense'],
-                    'Player URL': f"https://rankedin.com{player_datas['PlayerUrl']}",
-                    'Team Organisation Id': team_club_id,
-                    'Players Home Club Id': player_datas['HomeClub']['Id'],
-                    'Home Club Name': player_datas['HomeClub']['Name'],
-                    'Home Club Country': player_datas['HomeClub']['CountryShort'],
-                    'Home Club City': player_datas['HomeClub']['City'],
-                    'Home Club URL': f"https://rankedin.com{player_datas['HomeClub']['Url']}",
-                    'Ranking API URL': f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={player_id}",
-                }
+                    # Validate player data structure
+                    if not isinstance(player_datas, dict):
+                        logger.warning(f"Player data at index {idx} is not a dictionary for team {team_id}")
+                        continue
 
-                players_listings_dicts.append(datas)
+                    # Check required fields
+                    required_fields = ['Id', 'RankedinId', 'FirstName', 'PlayerOrder', 'RatingBegin',
+                                     'TeamParticipantType', 'HasLicense', 'PlayerUrl', 'HomeClub']
 
-            logger.info(f"Successfully collected {len(players_listings_dicts)} players for season {team_id}")
+                    missing_fields = [field for field in required_fields if field not in player_datas]
+                    if missing_fields:
+                        logger.warning(f"Player data missing fields {missing_fields} for team {team_id}, player index {idx}")
+                        continue
+
+                    player_id = player_datas['Id']
+
+                    # Validate HomeClub structure for this player
+                    player_home_club = player_datas['HomeClub']
+                    if not isinstance(player_home_club, dict):
+                        logger.warning(f"Player HomeClub data is not a dictionary for team {team_id}, player {player_id}")
+                        continue
+
+                    # Check required HomeClub fields
+                    home_club_fields = ['Id', 'Name', 'CountryShort', 'City', 'Url']
+                    missing_home_club_fields = [field for field in home_club_fields if field not in player_home_club]
+                    if missing_home_club_fields:
+                        logger.warning(f"Player HomeClub missing fields {missing_home_club_fields} for team {team_id}, player {player_id}")
+                        continue
+
+                    datas = {
+                        'Team_ID_Players': team_id,
+                        'Pool ID': raw_datas.get('PoolId', ''),
+                        'Team League ID': raw_datas.get('TeamLeagueId', ''),
+                        'Team League Name': raw_datas.get('TeamLeagueName', ''),
+                        'State Message': raw_datas.get('StateMessage', ''),
+                        'Player ID': player_id,
+                        'Ranking Position': ranking_map.get(player_id, ""),
+                        'Ranking Timestamp': timestamp_map.get(player_id, ""),
+                        'Ranking Name': ranking_name_map.get(player_id, ""),
+                        'RankedInId': player_datas.get('RankedinId', ''),
+                        'Name': player_datas.get('FirstName', ''),
+                        'Player Order': player_datas.get('PlayerOrder', ''),
+                        'Player Rating': player_datas.get('RatingBegin', ''),
+                        'Team Participant Type': player_datas.get('TeamParticipantType', ''),
+                        'Has License': player_datas.get('HasLicense', ''),
+                        'Player URL': f"https://rankedin.com{player_datas.get('PlayerUrl', '')}",
+                        'Team Organisation Id': team_club_id,
+                        'Players Home Club Id': player_home_club.get('Id', ''),
+                        'Home Club Name': player_home_club.get('Name', ''),
+                        'Home Club Country': player_home_club.get('CountryShort', ''),
+                        'Home Club City': player_home_club.get('City', ''),
+                        'Home Club URL': f"https://rankedin.com{player_home_club.get('Url', '')}",
+                        'Ranking API URL': f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={player_id}",
+                    }
+
+                    players_listings_dicts.append(datas)
+
+                except Exception as player_error:
+                    logger.error(f"Error processing player at index {idx} for team {team_id}: {player_error}")
+                    continue
+
+            logger.info(f"Successfully collected {len(players_listings_dicts)} players for team {team_id}")
             return players_listings_dicts
 
         except Exception as e:
@@ -872,7 +994,7 @@ async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches
 
             # If this is not the last attempt, wait and retry
             if attempt < max_retries - 1:
-                retry_delay = 15  # Exponential backoff
+                retry_delay = 15  # You might want to implement exponential backoff here
                 logger.info(f"Retrying team {team_id} in {retry_delay:.1f} seconds... (attempt {attempt + 2}/{max_retries})")
                 await asyncio.sleep(retry_delay)
             else:
