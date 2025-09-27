@@ -732,7 +732,7 @@ async def get_player_image_url(rankedin_id):
         return ""
 
 
-async def get_players(team_id, max_concurrent_rankings=3, delay_between_batches=5, max_retries=15):
+async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches=5, max_retries=15):
     random_delay = await random_interval(20)
     """
     Get players data with limited concurrency for ranking position requests
@@ -876,7 +876,7 @@ async def get_players(team_id, max_concurrent_rankings=3, delay_between_batches=
 
             # If this is not the last attempt, wait and retry
             if attempt < max_retries - 1:
-                retry_delay = (2 ** attempt) + random_delay  # Exponential backoff
+                retry_delay = 15  # Exponential backoff
                 logger.info(f"Retrying team {team_id} in {retry_delay:.1f} seconds... (attempt {attempt + 2}/{max_retries})")
                 await asyncio.sleep(retry_delay)
             else:
@@ -886,7 +886,7 @@ async def get_players(team_id, max_concurrent_rankings=3, delay_between_batches=
     return []
 
 
-async def collect_data_concurrently(season_id_home, season_id_away, match_ids, max_concurrent=3, delay_between_batches=5):
+async def collect_data_concurrently(season_id_home, season_id_away, match_ids, max_concurrent=10, delay_between_batches=5):
     """
     Collect players, matches, and organizations data with limited concurrency
 
@@ -1100,7 +1100,7 @@ async def collect_data_concurrently(season_id_home, season_id_away, match_ids, m
 '''
 
 
-async def collect_all_league_data(league_id, pool_id, max_concurrent = 3, delay_between_batches = 5):
+async def collect_all_league_data(league_id, pool_id, max_concurrent = 10, delay_between_batches = 5):
     """
     Master function to collect all data for a league/pool combination with concurrent execution
     """
