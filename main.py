@@ -31,7 +31,7 @@ async def main():
         bcc_emails = bcc_recipients if bcc_recipients else None,
         client_email = CLIENT_EMAIL,
         delay = 5,
-        batches = 3
+        batches = 5
 
     )
 
@@ -53,4 +53,5 @@ if __name__ == '__main__':
 
     except Exception as e:
         logger.exception(f'Error encountered {str(e)}')
+
 
