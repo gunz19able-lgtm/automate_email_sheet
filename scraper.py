@@ -875,13 +875,13 @@ async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches
             players_listings_dicts = []
             random_delay = await random_interval(delay_between_batches)
 
-            # Extract player IDs for ranking position lookup with validation
+            # Extract player IDs for ranking position lookup - include all valid IDs
             player_ids = []
-            for player_data in players_lists:
+            for idx, player_data in enumerate(players_lists):
                 if isinstance(player_data, dict) and 'Id' in player_data and player_data['Id'] is not None:
                     player_ids.append(player_data['Id'])
                 else:
-                    logger.warning(f"Invalid player data structure found for team {team_id}")
+                    logger.warning(f"Player at index {idx} has invalid/missing ID for team {team_id} - will skip ranking lookup for this player")
 
             # Get ranking positions with limited concurrency
             ranking_map = {}
@@ -925,34 +925,34 @@ async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches
                 try:
                     player_datas = players_lists[idx]
 
-                    # Validate player data structure
+                    # Validate player data structure - but don't skip, just use defaults
                     if not isinstance(player_datas, dict):
-                        logger.warning(f"Player data at index {idx} is not a dictionary for team {team_id}")
-                        continue
+                        logger.warning(f"Player data at index {idx} is not a dictionary for team {team_id} - using empty data")
+                        player_datas = {}
 
-                    # Check required fields
-                    required_fields = ['Id', 'RankedinId', 'FirstName', 'PlayerOrder', 'RatingBegin',
-                                     'TeamParticipantType', 'HasLicense', 'PlayerUrl', 'HomeClub']
+                    # Get player ID - this is essential, if missing we'll generate a placeholder
+                    player_id = player_datas.get('Id')
+                    if player_id is None:
+                        player_id = f"unknown_player_{team_id}_{idx}"
+                        logger.warning(f"Player ID missing for team {team_id}, player index {idx} - using placeholder: {player_id}")
 
-                    missing_fields = [field for field in required_fields if field not in player_datas]
-                    if missing_fields:
-                        logger.warning(f"Player data missing fields {missing_fields} for team {team_id}, player index {idx}")
-                        continue
+                    # Handle HomeClub data - don't skip if invalid, just use empty values
+                    player_home_club = player_datas.get('HomeClub')
+                    home_club_id = ''
+                    home_club_name = ''
+                    home_club_country = ''
+                    home_club_city = ''
+                    home_club_url = ''
 
-                    player_id = player_datas['Id']
-
-                    # Validate HomeClub structure for this player
-                    player_home_club = player_datas['HomeClub']
-                    if not isinstance(player_home_club, dict):
-                        logger.warning(f"Player HomeClub data is not a dictionary for team {team_id}, player {player_id}")
-                        continue
-
-                    # Check required HomeClub fields
-                    home_club_fields = ['Id', 'Name', 'CountryShort', 'City', 'Url']
-                    missing_home_club_fields = [field for field in home_club_fields if field not in player_home_club]
-                    if missing_home_club_fields:
-                        logger.warning(f"Player HomeClub missing fields {missing_home_club_fields} for team {team_id}, player {player_id}")
-                        continue
+                    if isinstance(player_home_club, dict):
+                        home_club_id = player_home_club.get('Id', '')
+                        home_club_name = player_home_club.get('Name', '')
+                        home_club_country = player_home_club.get('CountryShort', '')
+                        home_club_city = player_home_club.get('City', '')
+                        home_club_url = f"https://rankedin.com{player_home_club.get('Url', '')}" if player_home_club.get('Url') else ''
+                    else:
+                        if player_home_club is not None:
+                            logger.warning(f"Player HomeClub data is not a dictionary for team {team_id}, player {player_id} - using empty values")
 
                     datas = {
                         'Team_ID_Players': team_id,
@@ -970,13 +970,13 @@ async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches
                         'Player Rating': player_datas.get('RatingBegin', ''),
                         'Team Participant Type': player_datas.get('TeamParticipantType', ''),
                         'Has License': player_datas.get('HasLicense', ''),
-                        'Player URL': f"https://rankedin.com{player_datas.get('PlayerUrl', '')}",
+                        'Player URL': f"https://rankedin.com{player_datas.get('PlayerUrl', '')}" if player_datas.get('PlayerUrl') else '',
                         'Team Organisation Id': team_club_id,
-                        'Players Home Club Id': player_home_club.get('Id', ''),
-                        'Home Club Name': player_home_club.get('Name', ''),
-                        'Home Club Country': player_home_club.get('CountryShort', ''),
-                        'Home Club City': player_home_club.get('City', ''),
-                        'Home Club URL': f"https://rankedin.com{player_home_club.get('Url', '')}",
+                        'Players Home Club Id': home_club_id,
+                        'Home Club Name': home_club_name,
+                        'Home Club Country': home_club_country,
+                        'Home Club City': home_club_city,
+                        'Home Club URL': home_club_url,
                         'Ranking API URL': f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={player_id}",
                     }
 
@@ -984,9 +984,42 @@ async def get_players(team_id, max_concurrent_rankings=10, delay_between_batches
 
                 except Exception as player_error:
                     logger.error(f"Error processing player at index {idx} for team {team_id}: {player_error}")
-                    continue
+                    # Even if there's an error, try to create a minimal player record
+                    try:
+                        fallback_player_id = f"error_player_{team_id}_{idx}"
+                        fallback_data = {
+                            'Team_ID_Players': team_id,
+                            'Pool ID': raw_datas.get('PoolId', ''),
+                            'Team League ID': raw_datas.get('TeamLeagueId', ''),
+                            'Team League Name': raw_datas.get('TeamLeagueName', ''),
+                            'State Message': raw_datas.get('StateMessage', ''),
+                            'Player ID': fallback_player_id,
+                            'Ranking Position': '',
+                            'Ranking Timestamp': '',
+                            'Ranking Name': '',
+                            'RankedInId': '',
+                            'Name': f'Error Player {idx}',
+                            'Player Order': '',
+                            'Player Rating': '',
+                            'Team Participant Type': '',
+                            'Has License': '',
+                            'Player URL': '',
+                            'Team Organisation Id': team_club_id,
+                            'Players Home Club Id': '',
+                            'Home Club Name': '',
+                            'Home Club Country': '',
+                            'Home Club City': '',
+                            'Home Club URL': '',
+                            'Ranking API URL': f"https://api.rankedin.com/v1/player/GetHistoricDataAsync?id={fallback_player_id}",
+                        }
+                        players_listings_dicts.append(fallback_data)
+                        logger.info(f"Added fallback record for player at index {idx} in team {team_id}")
+                    except Exception as fallback_error:
+                        logger.error(f"Failed to create fallback record for player at index {idx} in team {team_id}: {fallback_error}")
 
             logger.info(f"Successfully collected {len(players_listings_dicts)} players for team {team_id}")
+            df = pd.DataFrame( data = players_listings_dicts)
+            df.to_excel('players.xlsx', index = False)
             return players_listings_dicts
 
         except Exception as e:
