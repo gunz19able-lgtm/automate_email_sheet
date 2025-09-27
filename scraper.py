@@ -177,14 +177,10 @@ async def get_players(season_id):
             # Create tasks for ranking positions
             ranking_tasks = [get_ranking_position_of_players(player_id) for player_id in player_ids]
 
-            # Create tasks for player images
-            image_tasks = [get_players(rankedin_id) for rankedin_id in rankedin_ids]
-
             # Run both sets of tasks concurrently
             logger.info("Fetching ranking positions and player images concurrently...")
             ranking_results, image_results = await asyncio.gather(
                 asyncio.gather(*ranking_tasks, return_exceptions=True),
-                asyncio.gather(*image_tasks, return_exceptions=True),
                 return_exceptions=True
             )
 
